@@ -233,7 +233,12 @@ static void ui(void) {
             if (UPSCALE_TEMPORAL(g_settings.upscaler)) ImGui::SameLine(), ImGui::TextDisabled("(not used with FSR 3.1 / FSR 4 / DLSS)");
             bool dof = !g_settings.dof_off;
             if (ImGui::Checkbox("Depth of field", &dof)) g_settings.dof_off = !dof;
-            ImGui::Checkbox("Anti-aliasing and motion blur from game (after restart)", &g_settings.game_blur);
+            // [XC3] two switches (romfs_virtual.c xc3_libnx_patch: lib_nx.bin read once, at start)
+            ImGui::Checkbox("Motion blur (after restart)", &g_settings.motion_blur);
+            ImGui::BeginDisabled(UPSCALE_TEMPORAL(g_settings.upscaler));
+            ImGui::Checkbox("Game's temporal anti-aliasing / TMAA (after restart)", &g_settings.game_taa);
+            ImGui::EndDisabled();
+            if (UPSCALE_TEMPORAL(g_settings.upscaler)) ImGui::SameLine(), ImGui::TextDisabled("(kept: FSR 3.1 / FSR 4 / DLSS use it)");
             ImGui::Checkbox("Show FPS in title bar", &g_settings.show_fps);
             ImGui::SeparatorText("Speed");
             static const int fpsv[] = {30, 60, 120, 144, 165, 0};

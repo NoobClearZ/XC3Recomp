@@ -2,7 +2,7 @@
 
 The plan for the native Windows port of *Xenoblade Chronicles 3* (version 2.2.0, build ID `82D187FE9EF9BE92`).
 Each phase lists what is done and what is open; update it when an item lands (commit hash) or a new one is found.
-Status as of 2026-11-06.
+Status as of 2026-11-10.
 
 ## Phase 1: Native Windows development
 
@@ -24,7 +24,19 @@ Done:
   allocation the AMD driver (maxMemoryAllocationSize 2 GB) accepted it, but shader reads past 2 GB faulted: GPU page
   fault, device lost (a driver timeout) on every jump into map 22. Shaders now pick the import by pool page.
 
+- DLC (`e12d217`): `aoc:u` lists the add-ons whose `bf3_dlcNN.arh` / `.ard` are in `<dump>/dlcs` (all four in one
+  merged folder), `fsp-srv` 202 (`OpenDataStorageByDataId`, what `nn::fs::MountAddOnContent` uses) serves that folder as
+  a second virtual RomFS image, movies `aocN:/...` are read from it; `xc3.ini dlc = 0` hides it. `GetDisplayVersion`
+  answers 2.2.0 (it was 1.0.0, and the title screen showed no Future Redeemed entry with it).
+- The game's motion blur and TMAA as two switches (`motion_blur`, `game_taa`): `monolib/shader/lib_nx.bin` in
+  `bf3.ard` is an "INIB" table (murmur3 key hashes) with XCDE's `lib_nx.ini` keys; `blur2` / `furBlur` / `tmaa` /
+  `AntiAliasing` are set to 0 in a re-compressed copy of its block. TMAA is kept with FSR 3.1 / 4 / DLSS (their inputs).
+
 Open:
+- Future Redeemed: its 3D scene does not render (grey / empty; HUD, battles, movies work), also without FSR 3 / 4.
+  `XC3_NO_PMEM=1` turns it into a blocky but visible scene, so it is in the pool / shader global memory path.
+  Repro: the replay `play/20261109_233911` on a copy of `save/backup/save_0_20261109_233913`, frame 2400.
+- The DLC's shaders are not precompiled (precompile.c reads `bf3.ard` only); `bf3_dlc04.ard` has its own.
 - Black / red box by the Colony 9 waterfall: one draw (vs `61e0c6ed00`, fs `61e0c6f400`, G-buffer albedo pure red).
   Not caused by the alias-region pool reads (checked with `XC3_PMM_MIRROR=1`, deterministic replay). Cause open.
 - (Rechecked 2026-11-06: the "about 17 fragment shaders failed to translate" note is resolved - those failures, VMNMX
@@ -116,8 +128,11 @@ Done:
 Open:
 - Choosing an install folder other than the repository.
 - Extraction from the user's own game packages (today: already extracted `exefs` / `romfs` folders only).
-- Updates and DLC: everything (patches, hooks, addresses) is tied to 2.2.0; another version means finding every
-  address again.
+- DLC folder in the launcher's Install & build tab (status, folder picker, "Use the DLC"), linked by
+  `setup_game_files.ps1` (`-Dlc`) as `targets\dlcs` and checked by `check_dump.py --dlcs` (`e12d217`).
+- Update 2.2.1 (June 2025, adjustments for Nintendo Switch 2): everything (patches, hooks, addresses, the
+  `lib_nx.bin` and button atlas block offsets) is tied to 2.2.0; another version means finding every address again.
+  New dumps are likely 2.2.1, which `check_dump.py` refuses today.
 - Installation management.
 
 ## Phase 4: Public source and testing

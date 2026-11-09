@@ -11,7 +11,7 @@
 const char *const g_language_codes[N_LANGUAGES] = {"", "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-Hans", "zh-Hant"};
 const char *const g_language_names[N_LANGUAGES] = {"Auto", "Japanese", "English", "French", "German", "Italian", "Spanish",
                                                    "Chinese", "Korean", "Dutch", "Portuguese", "Russian", "Chinese (Simplified)", "Chinese (Traditional)"};
-Settings g_settings = {.fps = 30, .volume = 1.0f, .movie_audio = true, .res_mode = RES_MATCH, .upscaler = UPSCALE_BILINEAR, .upscale_quality = UQ_PERFORMANCE /* [XC3] the game's own render size */, .game_blur = true, .vsync = true, .frame_lag = true, .ui_lang = 1};
+Settings g_settings = {.fps = 30, .volume = 1.0f, .movie_audio = true, .res_mode = RES_MATCH, .upscaler = UPSCALE_BILINEAR, .upscale_quality = UQ_PERFORMANCE /* [XC3] the game's own render size */, .game_blur = true, .motion_blur = true, .game_taa = true, .vsync = true, .frame_lag = true, .ui_lang = 1};
 int g_window_w = 1280, g_window_h = 720;  // windowed size (settings.h)
 
 // [XCDE] Mods (runtime/services/romfs_virtual.c): xcde.ini `mod_<folder> = 0/1`; a folder not listed is on.
@@ -87,7 +87,11 @@ void settings_load(void) {
         else if (!strcmp(k, "cutscenes")) g_settings.cutscene_mode = !strcmp(v, "30") ? 1 : !strcmp(v, "30fg") ? 2 : 0;
         else if (!strcmp(k, "antialias")) g_settings.antialias = !strcmp(v, "smaa") ? AA_SMAA : AA_OFF;
         else if (!strcmp(k, "depth_of_field")) g_settings.dof_off = atoi(v) == 0;
-        else if (!strcmp(k, "game_blur")) g_settings.game_blur = atoi(v) != 0;
+        else if (!strcmp(k, "game_blur")) {  // [XC3] (the older single switch: 0 = both of the two below off)
+            g_settings.game_blur = atoi(v) != 0;
+            if (!g_settings.game_blur) g_settings.motion_blur = g_settings.game_taa = false;
+        } else if (!strcmp(k, "motion_blur")) g_settings.motion_blur = atoi(v) != 0;
+        else if (!strcmp(k, "game_taa")) g_settings.game_taa = atoi(v) != 0;
         else if (!strcmp(k, "dlc")) g_settings.dlc_off = atoi(v) == 0;
         else if (!strcmp(k, "vsync")) {
             if (!strcmp(v, "immediate") || !strcmp(v, "vrr") || !strcmp(v, "off") || !strcmp(v, "0")) {
@@ -147,7 +151,7 @@ void settings_save(void) {
     fprintf(f, "upscale_quality = %s\nframe_gen = %d\n",
             uq[g_settings.upscale_quality >= 0 && g_settings.upscale_quality <= 4 ? g_settings.upscale_quality : 1], g_settings.frame_gen);
     fprintf(f, "depth_of_field = %d\n", !g_settings.dof_off);
-    fprintf(f, "game_blur = %d\n", g_settings.game_blur);
+    fprintf(f, "motion_blur = %d\ngame_taa = %d\n", g_settings.motion_blur, g_settings.game_taa);  // [XC3] (were game_blur)
     fprintf(f, "dlc = %d\n", !g_settings.dlc_off);
     if (g_settings.anisotropy) fprintf(f, "anisotropy = %d\n", g_settings.anisotropy);
     if (g_settings.astc_mode) fprintf(f, "astc_decoder = cpu\n");

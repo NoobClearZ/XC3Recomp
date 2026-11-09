@@ -87,6 +87,81 @@ static void edit_ini(File *f, const char *edits) {
     f->size = len;
     fprintf(stderr, "[romfs] %s: %d settings edited (%s)\n", f->path, changed, edits);
 }
+// [XC3] The game's graphics configuration is monolib/shader/lib_nx.bin inside bf3.ard: an "INIB" table of the same
+// keys as XCDE's lib_nx.ini (12-byte entries: murmur3 hash of the key, type, offset of its 4-byte value). xc3.ini
+// `motion_blur = 0` sets motion blur (blur2) and fur blur (furBlur) to 0; `game_taa = 0` the game's temporal AA
+// (tmaa, AntiAliasing), but not with FSR 3 / 4 or DLSS: they take their inputs from its first pass
+// (nvn/vulkan/exec.c xc3_tmp_upscale). (`game_blur = 0`, the older switch, turns both off: settings_ini.c.) The block is re-compressed in place: it must fit the old one's compressed
+// size, so the offsets bf3.arh lists stay; any mismatch (another game version) leaves it alone. Block of 2.2.0.
+#include <zstd.h>
+static uint32_t mm3(const char *s) {  // murmur3 x86 32, seed 0 (the game's key hashes)
+    size_t n = strlen(s);
+    uint32_t h = 0, k;
+    const uint8_t *p = (const uint8_t *)s;
+    for (size_t i = 0; i + 4 <= n; i += 4) {
+        memcpy(&k, p + i, 4);
+        k *= 0xcc9e2d51u; k = (k << 15) | (k >> 17); k *= 0x1b873593u;
+        h ^= k; h = (h << 13) | (h >> 19); h = h * 5 + 0xe6546b64u;
+    }
+    k = 0;
+    for (size_t j = n & 3; j; j--) k = (k << 8) | p[(n & ~(size_t)3) + j - 1];
+    if (n & 3) { k *= 0xcc9e2d51u; k = (k << 15) | (k >> 17); k *= 0x1b873593u; h ^= k; }
+    h ^= (uint32_t)n; h ^= h >> 16; h *= 0x85ebca6bu; h ^= h >> 13; h *= 0xc2b2ae35u; h ^= h >> 16;
+    return h;
+}
+static int xc3_libnx_patch(const char *ard, uint64_t *off, uint8_t **data, uint64_t *len) {
+    static const uint64_t k_block = 0x2423705e0ull;  // lib_nx.bin
+    static const char *const blur[] = {"blur2", "furBlur", NULL}, *const taa[] = {"tmaa", "AntiAliasing", NULL};
+    const char *const *sets[2] = {g_settings.motion_blur ? NULL : blur,
+                                  g_settings.game_taa || UPSCALE_TEMPORAL(g_settings.upscaler) ? NULL : taa};
+    if (!sets[0] && !sets[1]) return 0;
+    FILE *f = fopen(ard, "rb");
+    if (!f) return 0;
+    uint8_t h[0x30];
+    uint32_t type = 0, ds = 0, cs = 0;
+    if (!_fseeki64(f, (long long)k_block, SEEK_SET) && fread(h, 1, 0x30, f) == 0x30)
+        memcpy(&type, h + 4, 4), memcpy(&ds, h + 8, 4), memcpy(&cs, h + 12, 4);
+    if (memcmp(h, "xbc1", 4) || strncmp((const char *)h + 0x14, "lib_nx.bin", 28) || type != 3 || cs > 65536 || ds > 65536) {
+        fprintf(stderr, "[romfs] bf3.ard: lib_nx.bin not at %llx (another game version?): motion_blur / game_taa = 0 not applied\n", (unsigned long long)k_block);
+        fclose(f);
+        return 0;
+    }
+    uint8_t *c = malloc(cs), *d = malloc(ds);
+    size_t got = fread(c, 1, cs, f) == cs ? ZSTD_decompress(d, ds, c, cs) : 0;
+    fclose(f);
+    free(c);
+    uint32_t cnt = 0;
+    if (!got || ZSTD_isError(got) || got < 16 || memcmp(d, "INIB", 4)) { free(d); return 0; }
+    memcpy(&cnt, d + 12, 4);
+    char done[128] = "";
+    for (int s = 0; s < 2; s++)
+        for (const char *const *key = sets[s]; key && *key; key++) {
+            uint32_t want = mm3(*key);
+            for (uint32_t i = 0; i < cnt && 0x10 + 12ull * (i + 1) <= got; i++) {
+                uint32_t e[3];
+                memcpy(e, d + 0x10 + 12 * i, 12);
+                if (e[0] != want || (uint64_t)e[2] + 4 > got) continue;
+                memset(d + e[2], 0, 4);
+                snprintf(done + strlen(done), sizeof done - strlen(done), "%s%s", *done ? "," : "", *key);
+            }
+        }
+    size_t cap = ZSTD_compressBound(got);
+    uint8_t *blk = calloc(1, 0x30 + (cap > cs ? cap : cs));
+    size_t ncs = ZSTD_compress(blk + 0x30, cap, d, got, 19);
+    free(d);
+    if (!*done || ZSTD_isError(ncs) || ncs > cs) {
+        fprintf(stderr, "[romfs] lib_nx.bin: %s - motion_blur / game_taa = 0 not applied\n", !*done ? "no keys found" : "the edited block does not fit");
+        free(blk);
+        return 0;
+    }
+    memcpy(blk, h, 0x30);
+    uint32_t ncs32 = (uint32_t)ncs;
+    memcpy(blk + 12, &ncs32, 4);  // (same decompressed size)
+    *off = k_block, *data = blk, *len = 0x30 + (uint64_t)cs;  // (the old span: rest zero)
+    fprintf(stderr, "[romfs] lib_nx.bin: %s off (xc3.ini motion_blur / game_taa)\n", done);
+    return 1;
+}
+
 static void maybe_edit(File *f) {
     extern bool kbicons_wanted(const char *path), kbicons_init(void), settings_mod_enabled(const char *name);
     extern uint8_t *kbicons_make(const char *path, uint64_t *len);
@@ -97,11 +172,11 @@ static void maybe_edit(File *f) {
             // the launcher's "Iconos de botones" (auto resolved there by the connected controller): mod_icons_*
             int style = settings_mod_enabled("icons_keyboard") ? 0 : settings_mod_enabled("icons_xbox") ? 1
                       : settings_mod_enabled("icons_playstation") ? 2 : -1;
-            if (style < 0 || !kbicons_init()) return;
             extern int kbicons_ard_patches(const char *ard, int style, uint64_t *offs, uint8_t **datas, uint64_t *lens, int max);
-            uint64_t o[8], l[8];
-            uint8_t *d[8];
-            int n = kbicons_ard_patches(f->path, style, o, d, l, 8);
+            uint64_t o[9], l[9];
+            uint8_t *d[9];
+            int n = style >= 0 && kbicons_init() ? kbicons_ard_patches(f->path, style, o, d, l, 8) : 0;
+            n += xc3_libnx_patch(f->path, o + n, d + n, l + n);
             if (n) {
                 f->patch = calloc((size_t)n, sizeof *f->patch);
                 for (int i = 0; i < n; i++) f->patch[i] = (Patch){o[i], l[i], d[i]};

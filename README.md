@@ -37,12 +37,16 @@ The project is currently in active development (**Phases 1 & 2** of the [Roadmap
   - Spatial: AMD FSR 1.0;
   - Temporal: AMD FSR 3.1 / FSR 4 or NVIDIA DLSS (with native-AA / DLAA modes);
   - Extra: SMAA (automatically bypassed when temporal upscalers like FSR/DLSS are active).
+- The game's own motion blur and temporal anti-aliasing (TMAA) can each be turned off (launcher: Graphics; `motion_blur` / `game_taa`). TMAA stays on with FSR 3.1 / FSR 4 / DLSS, which take their inputs from it.
 - Shader precompilation: Ahead-of-time pipeline building to eliminate in-game shader compilation stutters. The SPIR-V cache is packed into `cache/spirv.pack`.
 
 **Frame rate**
 - 30 / 60 FPS options (the 60 FPS option is adapted from the community 60 FPS patch; cutscenes remain locked at a steady 30 FPS).
 - Automatic frame-lag reduction at 60 FPS: allows one frame in flight for lower latency, smoother frametimes, and holding 60 FPS in heavy areas.
 - V-Sync toggle.
+
+**DLC (add-on content)**
+- The Expansion Pass add-ons and Future Redeemed are served from your own extracted DLC files (`<game folder>/dlcs`, see below): the game finds them as installed and mounts them. Future Redeemed can be started from the title screen, but its 3D scene does not render yet (see [Known issues](#known-issues)).
 
 **Controls & UI**
 - Full Keyboard and Mouse support with camera mouse-look, plus configurable sensitivity and keybindings.
@@ -51,7 +55,7 @@ The project is currently in active development (**Phases 1 & 2** of the [Roadmap
 - Cursor auto-hide while the game window is focused.
 
 **Robustness & Diagnostics**
-- **Safe saves:** Save commits are verified with an automated backup system kept per session (`save/backup/`).
+- **Safe saves:** Save commits are verified with an automated backup system kept per session (`save/backup/`; only the newest 5 are kept, so copy one elsewhere to keep it longer).
 - **Session recordings & replay:** Built-in session recorder (`play/<timestamp>`) for diagnostics, regression testing, and performance profiling.
 - **Map-jump tour (developers):** `tools/xc3_tour.py` replays a save load, then fast-travels through a list of jump points in hidden batches (a scratch copy of the save, never the real one) and writes a per-point summary (reached, worst frame time, shader build waits) plus optional captures. The jump list is generated from your own game files and is never committed.
 - **Hardware-aware scaling:** Detects CPU core counts and GPU capabilities, tuning thread pools and memory budgets accordingly.
@@ -94,11 +98,17 @@ You need the game files extracted from your own copy of **Xenoblade Chronicles 3
 │   ├── rtld          (build-id: e79ab9af2ab05174)
 │   ├── sdk           (build-id: e8cdceb1e77a8465)
 │   └── subsdk0       (build-id: be1ee79a9968a35a)
-└── romfs/
+├── romfs/
+│   ├── movie/
+│   ├── sound/
+│   └── ...
+└── dlcs/             (optional: the DLC's files, all add-ons in one folder)
+    ├── bf3_dlc01.arh / bf3_dlc01.ard   ... bf3_dlc04.arh / bf3_dlc04.ard
     ├── movie/
-    ├── sound/
-    └── ...
+    └── sound/
 ```
+
+**DLC (optional):** the extracted romfs of the add-ons, merged into one folder. An add-on counts when both of its archives (`bf3_dlcNN.arh` and `.ard`) are there; 04 is Future Redeemed. The game files step links it to `targets/dlcs` when the chosen folder has one; the launcher's **Install & build** tab can also choose it on its own (**DLC (optional)**), and `xc3.ini` `dlc = 0` hides it from the game. Check a DLC folder with `python tools/extract/check_dump.py --dlcs <folder>`.
 
 **Setup:**
 - In `Build XC3.bat` or the launcher's **Install & build** tab, choose that folder to link it to `targets/exefs` and `targets/romfs` automatically.
@@ -182,7 +192,10 @@ Settings are managed via the launcher or directly in `xc3.ini` in the repository
 | `vsync` | `0`, `1` | Vertical sync |
 | `cutscenes` | `same`, `30`, `30fg` | Framerate behaviour during cutscenes |
 | `antialias` | `smaa`, `off` | Post-process anti-aliasing |
-| `language` | `auto`, `en-GB`, `en-US`, `ja`, `fr`, `de`, `it`, `es` | In-game text language |
+| `motion_blur` | `0`, `1` | The game's motion blur and fur blur (applied at start) |
+| `game_taa` | `0`, `1` | The game's temporal anti-aliasing, TMAA (applied at start; kept with FSR 3.1 / FSR 4 / DLSS) |
+| `dlc` | `0`, `1` | Serve the DLC in `targets/dlcs` to the game |
+| `language` | `auto`, `en-US`, `ja`, `fr`, `de`, `it`, `es`, `ko`, `zh-Hans`, `zh-Hant` | In-game text language (only the languages your copy has) |
 | `stick_deadzone` | `0`–`30` | Analog stick deadzone percentage |
 | `bind_key_*`, `bind_pad_*` | Various | Key and controller bindings |
 | `mod_<folder>` | `0`, `1` | Enable or disable specific romfs mods |
@@ -195,6 +208,8 @@ In game, **F1** opens the settings overlay.
 - **First visit to an area:** Shader and pipeline builds can still cause hitches of up to a few seconds the first time an area is entered on a fresh cache (measured by the tour); with the shaders cached, later visits hitch much less.
 - **Graphical quirks:**
   - Red / black box artifact near the Colony 9 waterfall (one draw call undergoing investigation).
+  - Future Redeemed: the 3D scene does not render (grey / empty background; the HUD, battles and movies work). It is in the renderer's GPU memory pool path, not the DLC loading; under investigation.
+- **DLC shaders:** the shader precompilation reads only the base game's archive, so the DLC's shaders build the first time they are seen.
 - **Memory scaling in long sessions:** Pipeline libraries and driver memory grow over multi-hour play sessions; restarting periodically resolves any accumulated stutter.
 - **Platform support:** Currently focused on Windows x86-64 with Vulkan 1.3.
 

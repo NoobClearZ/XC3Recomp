@@ -71,6 +71,8 @@ typedef struct {
     int astc_mode;       // [XC3] 0 = Auto / GPU Compute (NVIDIA/AMD), 1 = CPU Software Fallback
     bool frame_lag;      // [XC3] one frame in flight at 60 fps (xc3.ini frame_lag = 0/1, default 1; runtime/nvn/objects.c)
     bool game_blur;      // [XCDE] the game's own AA / temporal AA / motion blur (lib_nx.ini; xcde.ini game_blur = 0/1)
+    bool motion_blur;    // [XC3] the game's motion blur and fur blur (lib_nx.bin blur2 / furBlur; xc3.ini motion_blur = 0/1)
+    bool game_taa;       // [XC3] the game's temporal AA (lib_nx.bin tmaa / AntiAliasing; xc3.ini game_taa = 0/1; kept with FSR 3 / 4 / DLSS)
     int upscale_quality; // [XCDE] UQ_*: FSR 3 / DLSS render size (xcde.ini upscale_quality = native|quality|balanced|performance|ultra)
     bool frame_gen;      // [XCDE] FSR 3 / DLSS frame generation (xcde.ini frame_gen = 0/1)
     int ui_lang;         // [XC3] launcher and F1-menu language: permanently 1 (English)

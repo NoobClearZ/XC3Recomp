@@ -90,7 +90,8 @@ struct Cfg {
     bool frame_gen = false;
     bool smaa = false;
     bool dof = true;        // the game's depth of field (T183)
-    bool game_blur = true;  // the game's own AA / temporal AA / motion blur (lib_nx.ini)
+    bool motion_blur = true;  // [XC3] the game's motion blur and fur blur (runtime/services/romfs_virtual.c, lib_nx.bin)
+    bool game_taa = true;     // [XC3] the game's temporal AA (TMAA; kept with FSR 3.1 / FSR 4 / DLSS)
     bool vsync = true;      // FIFO presentation at 30 / 60 fps
     int present_mode = 0;   // [XC3] 0 = FIFO, 1 = Mailbox, 2 = Immediate (VRR)
     int anisotropy = 16;    // [XC3] 0 = Default, 2..16 Forced Anisotropic Filtering (default: 16)
@@ -455,7 +456,9 @@ static void load() {
         else if (!strcmp(k, "frame_gen")) g.frame_gen = atoi(v) != 0;
         else if (!strcmp(k, "antialias")) g.smaa = !strcmp(v, "smaa");
         else if (!strcmp(k, "depth_of_field")) g.dof = atoi(v) != 0;
-        else if (!strcmp(k, "game_blur")) g.game_blur = atoi(v) != 0;
+        else if (!strcmp(k, "game_blur")) { if (atoi(v) == 0) g.motion_blur = g.game_taa = false; }  // (the older single switch)
+        else if (!strcmp(k, "motion_blur")) g.motion_blur = atoi(v) != 0;
+        else if (!strcmp(k, "game_taa")) g.game_taa = atoi(v) != 0;
         else if (!strcmp(k, "vsync")) {
             if (!strcmp(v, "immediate") || !strcmp(v, "vrr") || !strcmp(v, "off") || !strcmp(v, "0")) {
                 g.vsync = false;
@@ -517,7 +520,7 @@ static bool save() {
     g.frame_lag = (g.fps == 1);      // [XC3] 60 fps automatically enables frame lag
     fprintf(f, "upscale_quality = %s\nframe_gen = %d\n", k_uq_ini[g.uquality], g.frame_gen);
     fprintf(f, "depth_of_field = %d\n", g.dof);
-    fprintf(f, "game_blur = %d\n", g.game_blur);
+    fprintf(f, "motion_blur = %d\ngame_taa = %d\n", g.motion_blur, g.game_taa);
     fprintf(f, "dlc = %d\n", g.dlc);
     if (g.anisotropy) fprintf(f, "anisotropy = %d\n", g.anisotropy);
     if (g.astc_mode) fprintf(f, "astc_decoder = cpu\n");
@@ -1244,6 +1247,16 @@ static void tab_graphics() {
     ImGui::Checkbox(T("Antialiasing SMAA"), &g.smaa);
     ImGui::EndDisabled();
     if (g.upscaler >= 2) ImGui::SameLine(), ImGui::TextDisabled(T("(no se usa con FSR 3.1 / FSR 4 / DLSS)"));
+    // [XC3] the game's own blur and TAA (runtime/services/romfs_virtual.c xc3_libnx_patch: lib_nx.bin)
+    ImGui::Checkbox(T("Motion blur"), &g.motion_blur);
+    ImGui::SetItemTooltip(T("The motion blur (and fur blur) the game applies when the camera or characters move.\n"
+                          "Off: a sharper image in motion. Applied when the game starts."));
+    ImGui::BeginDisabled(g.upscaler >= 2);
+    ImGui::Checkbox(T("Game's temporal anti-aliasing (TMAA)"), &g.game_taa);
+    ImGui::EndDisabled();
+    if (g.upscaler >= 2) ImGui::SameLine(), ImGui::TextDisabled(T("(kept: FSR 3.1 / FSR 4 / DLSS use it)"));
+    ImGui::SetItemTooltip(T("The temporal anti-aliasing the game uses for the Switch's resolution: smooth edges, but a\n"
+                          "softer image. Off: a sharper image (SMAA can smooth the edges). Applied when the game starts."));
     ImGui::Checkbox(T("Mostrar FPS en la barra de título"), &g.show_fps);
     static const char *aniso_names[] = {"Default", "2x", "4x", "8x", "16x (Recomendado)"};
     static const int aniso_vals[] = {0, 2, 4, 8, 16};
