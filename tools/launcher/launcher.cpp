@@ -141,8 +141,8 @@ static const char *const k_res_ui[] = {"Match window (recommended)", "1x - 1080p
                                        "3x - 3240p", "75% of window", "50% of window", "Dynamic (based on performance)"};
 #define RES_HINT "XC3 renders the game at 1080p (Switch docked). Higher resolution = sharper image and higher GPU load."
 static const char *const k_fps_ini[] = {"30", "60", "120", "144", "165", "unlimited"};
-static const char *const k_lang_ini[] = {"auto", "en-US", "es", "fr", "de", "it", "ja"};
-static const char *const k_lang_ui[] = {"English (default)", "English", "Spanish", "French", "German", "Italian", "Japanese"};
+static const char *const k_lang_ini[] = {"auto", "en-US", "es", "fr", "de", "it", "ja", "ko", "zh-Hans", "zh-Hant"};
+static const char *const k_lang_ui[] = {"English (default)", "English", "Spanish", "French", "German", "Italian", "Japanese", "Korean", "Chinese (Simplified)", "Chinese (Traditional)"};
 
 static Cfg g;
 
@@ -178,7 +178,8 @@ static const char *const k_en[][2] = {
     {"75% de la ventana", "75% of the window"}, {"50% de la ventana", "50% of the window"},
     {"Dinámica (según rendimiento)", "Dynamic (by performance)"},
     {"Inglés (por defecto)", "English (default)"}, {"Inglés", "English"}, {"Español", "Spanish"}, {"Francés", "French"},
-    {"Alemán", "German"}, {"Italiano", "Italian"}, {"Japonés", "Japanese"},
+    {"Alemán", "German"}, {"Italiano", "Italian"}, {"Japonés", "Japanese"}, {"Coreano", "Korean"},
+	{"Chino simplificado", "Chinese (Simplified)"}, {"Chino tradicional", "Chinese (Traditional)"},
     {"Pantalla", "Display"}, {"Pantalla completa", "Fullscreen"}, {"Tamaño de la ventana", "Window size"},
     {"Resolución y escalado", "Resolution and scaling"}, {"Resolución interna", "Internal resolution"},
     {"El juego original renderiza a 720p. Más resolución = imagen más nítida y más carga para la GPU.",
@@ -482,7 +483,7 @@ static void load() {
         else if (!strcmp(k, "fps")) { g.fps = 0; for (int j = 0; j < 6; j++) if (!strcmp(v, k_fps_ini[j])) g.fps = j; }
         else if (!strcmp(k, "volume")) g.volume = atoi(v);
         else if (!strcmp(k, "movie_audio")) g.movie_audio = atoi(v) != 0;
-        else if (!strcmp(k, "language") && (i = find(k_lang_ini, 7, v)) >= 0) g.lang = i;
+        else if (!strcmp(k, "language") && (i = find(k_lang_ini, 10, v)) >= 0) g.lang = i;
         else if (!strncmp(k, "mod_", 4)) g_mods.push_back(Mod{k + 4, atoi(v) != 0, false});
         else if (!strncmp(k, "bind_pad_", 9) && (i = find(k_ini, NPAD, k + 9)) >= 0) {
             int h = find(k_pad_ini, PADB_COUNT, v);
@@ -1423,7 +1424,7 @@ static void tab_audio() {
     ImGui::Checkbox(T("Sonido de los vídeos"), &g.movie_audio);
     section(T("Idioma del juego"));
     ImGui::SetNextItemWidth(260 * g_scale);
-    ImGui::Combo(T("Idioma"), &g.lang, TL(k_lang_ui, 7).p, 7);
+    ImGui::Combo(T("Idioma"), &g.lang, TL(k_lang_ui, 10).p, 10);
     ImGui::TextDisabled(T("Textos del juego. Solo los idiomas que incluya tu copia; si uno falla, vuelve a Inglés."));
 }
 

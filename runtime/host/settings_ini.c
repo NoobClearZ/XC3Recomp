@@ -8,9 +8,9 @@
 #include "../input_bind.h"
 #include "../settings.h"
 
-const char *const g_language_codes[N_LANGUAGES] = {"", "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru"};
+const char *const g_language_codes[N_LANGUAGES] = {"", "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-Hans", "zh-Hant"};
 const char *const g_language_names[N_LANGUAGES] = {"Auto", "Japanese", "English", "French", "German", "Italian", "Spanish",
-                                                   "Chinese", "Korean", "Dutch", "Portuguese", "Russian"};
+                                                   "Chinese", "Korean", "Dutch", "Portuguese", "Russian", "Chinese (Simplified)", "Chinese (Traditional)"};
 Settings g_settings = {.fps = 30, .volume = 1.0f, .movie_audio = true, .res_mode = RES_MATCH, .upscaler = UPSCALE_BILINEAR, .upscale_quality = UQ_PERFORMANCE /* [XC3] the game's own render size */, .game_blur = true, .vsync = true, .frame_lag = true, .ui_lang = 1};
 int g_window_w = 1280, g_window_h = 720;  // windowed size (settings.h)
 
