@@ -347,7 +347,7 @@ const char *romfs_file_at(uint64_t off) {
 void romfs_file_read_hook(const char *path);
 
 // ------------------------------------------------------------------ IStorage (raw RomFS image)
-typedef struct { int fd; uint64_t size; bool virt; } Storage;  // [XCDE] virt: folder-backed image
+typedef struct { int fd; uint64_t size; bool virt; Rvfs *aoc; } Storage;  // [XCDE] virt: folder-backed image; [XC3] aoc: add-on content
 
 static void storage(Service *s, IpcReq *req, IpcResp *resp) {
     Storage *st = s->state;
@@ -357,9 +357,17 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         IpcBuf *b = out_buf(req, 0);
         if (!b) { resp->result = MAKE_RESULT(2, 6001); break; }
         if (size > b->size) size = b->size;
-        ssize_t n = st->virt ? (ssize_t)rvfs_read((uint8_t *)(uintptr_t)b->addr, size, off)  // [XCDE]
+        ssize_t n = st->aoc    ? (ssize_t)rvfs_iread(st->aoc, (uint8_t *)(uintptr_t)b->addr, size, off)  // [XC3]
+                  : st->virt ? (ssize_t)rvfs_read((uint8_t *)(uintptr_t)b->addr, size, off)  // [XCDE]
                              : romfs_read(st->fd, (uint8_t *)(uintptr_t)b->addr, size, off);
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
+        if (st->aoc) {  // [XC3] (no romfs hooks: they look for the game's own files)
+            const char *path = rvfs_ifile_at(st->aoc, off);
+            static const char *last;
+            if (path && path != last && getenv("LARECOMP_LOG_FILES")) LOG("[fs] aoc read %s\n", path);
+            last = path;
+            break;
+        }
         {
             const char *path = st->virt ? rvfs_file_at(off) : romfs_file_at(off);
             static const char *last;
@@ -375,7 +383,7 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         if ((reads & (reads - 1)) == 0) LOG("[fs] romfs reads: %llu (%llu KB)\n", reads, bytes >> 10);
         break;
     }
-    case 4: OUT(uint64_t, 0) = st->virt ? rvfs_size() : (ov_n ? ov_end : st->size); resp_size(resp, 8); break;  // GetSize
+    case 4: OUT(uint64_t, 0) = st->aoc ? rvfs_isize(st->aoc) : st->virt ? rvfs_size() : (ov_n ? ov_end : st->size); resp_size(resp, 8); break;  // GetSize
     default: diag_unimplemented("ipc", "[fs] IStorage cmd %u", req->cmd);
     }
 }
@@ -798,6 +806,22 @@ static Service *open_host_fs(const char *sub) {
     return service_new("IFileSystem", filesystem, fs);
 }
 
+// [XC3] The add-on content folder as one virtual RomFS image, built on the first mount and shared by every index.
+static Rvfs *open_aoc_image(void) {
+    static Rvfs *img;
+    static int tried;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lock);
+    if (!tried++ && g_dlc_dir) {
+        char why[256];
+        img = rvfs_open(g_dlc_dir, why, sizeof why);
+        if (img) LOG("[fs] add-on content image over %s: %llu bytes\n", g_dlc_dir, (unsigned long long)rvfs_isize(img));
+        else LOG("[fs] add-on content: %s\n", why);
+    }
+    pthread_mutex_unlock(&lock);
+    return img;
+}
+
 // ------------------------------------------------------------------ fsp-srv
 SERVICE("fsp-srv", fsp_srv) {
     (void)s;
@@ -813,10 +837,23 @@ SERVICE("fsp-srv", fsp_srv) {
         break;
     }
     case 200: ipc_return_object(resp, open_romfs_storage()); break;  // OpenDataStorageByCurrentProcess
-    case 202:  // OpenDataStorageByDataId (system data archives)
-        LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", IN(uint64_t, 8));
-        resp->result = MAKE_RESULT(2, 1001);
+    case 202: {  // OpenDataStorageByDataId (system data archives; [XC3] the add-on content: nn::fs::MountAddOnContent)
+        uint64_t id = IN(uint64_t, 8);
+        extern int aoc_index_of(uint64_t data_id);
+        int idx = aoc_index_of(id);
+        Rvfs *aoc = idx ? open_aoc_image() : NULL;
+        if (!aoc) {
+            LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", (unsigned long long)id);
+            resp->result = MAKE_RESULT(2, 1001);
+            break;
+        }
+        LOG("[fs] OpenDataStorageByDataId %llx: add-on content %d (%s)\n", (unsigned long long)id, idx, g_dlc_dir);
+        Storage *st = calloc(1, sizeof *st);
+        st->aoc = aoc;
+        st->size = rvfs_isize(aoc);
+        ipc_return_object(resp, service_new("IStorage(aoc)", storage, st));
         break;
+    }
     case 1005: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;  // GetGlobalAccessLogMode
     case 1003: case 1004: case 1006: break;
     case 1011: memset(resp->data, 0, 0x10); resp_size(resp, 0x10); break;

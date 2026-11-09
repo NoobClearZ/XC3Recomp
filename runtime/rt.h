@@ -86,3 +86,4 @@ void guest_call(Cpu *c, uint64_t addr);   // call guest function at addr (saves/
 uint64_t guest_sym(const char *name);     // cached loader_find_symbol, fatal if missing
 void *hle_alloc(uint64_t size);           // zeroed guest-visible memory (never freed)
 extern const char *g_romfs_dir;
+extern const char *g_dlc_dir;             // [XC3] <dump>/dlcs, NULL without add-on content (host/main_boot.c)

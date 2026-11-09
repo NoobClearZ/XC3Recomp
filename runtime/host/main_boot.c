@@ -6,14 +6,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <sys/stat.h>
 #include <windows.h>
 
 #include "../gamelib.h"
 #include "../hle.h"
 #include "../kernel.h"
 #include "../rt.h"
+#include "../settings.h"
 
 const char *g_romfs_dir;
+const char *g_dlc_dir;
 
 #ifdef XCDE_GFX
 // [XCDE] T194: laptops with two GPUs (NVIDIA Optimus / AMD switchable graphics) run a program on the integrated one
@@ -115,6 +118,14 @@ int main(int argc, char **argv) {
     snprintf(romfs, sizeof romfs, "%s/romfs", root);
     snprintf(npdm_path, sizeof npdm_path, "%s/main.npdm", exefs);
     g_romfs_dir = strdup(romfs);
+    {   // [XC3] add-on content: <dump>/dlcs (services/fs.c, services/misc.c aoc:u), unless xc3.ini says dlc = 0
+        char dlcs[1024];
+        struct stat sb;
+        snprintf(dlcs, sizeof dlcs, "%s/dlcs", root);
+        settings_load();
+        if (!g_settings.dlc_off && stat(dlcs, &sb) == 0 && S_ISDIR(sb.st_mode)) g_dlc_dir = strdup(dlcs);
+        fprintf(stderr, "[aoc] add-on content: %s\n", g_dlc_dir ? g_dlc_dir : g_settings.dlc_off ? "off (xc3.ini dlc = 0)" : "none");
+    }
 
     diag_watchdog_start();
     if (getenv("XCDE_WATCHDOG")) CreateThread(NULL, 0, watchdog_main, (LPVOID)(uintptr_t)atoi(getenv("XCDE_WATCHDOG")), 0, NULL);

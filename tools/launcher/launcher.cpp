@@ -103,6 +103,7 @@ struct Cfg {
     int fps = 0;  // index into k_fps_ini
     int volume = 100;
     bool movie_audio = true;
+    bool dlc = true;        // [XC3] serve the add-on content in targets/dlcs (xc3.ini dlc = 0/1; runtime/services/misc.c)
     int lang = 0;           // index into k_langs
     int pad[NPAD];
     int key[NACT], key2[NACT];  // SDL_Scancode or mouse (MOUSE_BASE + ...)
@@ -483,6 +484,7 @@ static void load() {
         else if (!strcmp(k, "fps")) { g.fps = 0; for (int j = 0; j < 6; j++) if (!strcmp(v, k_fps_ini[j])) g.fps = j; }
         else if (!strcmp(k, "volume")) g.volume = atoi(v);
         else if (!strcmp(k, "movie_audio")) g.movie_audio = atoi(v) != 0;
+        else if (!strcmp(k, "dlc")) g.dlc = atoi(v) != 0;
         else if (!strcmp(k, "language") && (i = find(k_lang_ini, 10, v)) >= 0) g.lang = i;
         else if (!strncmp(k, "mod_", 4)) g_mods.push_back(Mod{k + 4, atoi(v) != 0, false});
         else if (!strncmp(k, "bind_pad_", 9) && (i = find(k_ini, NPAD, k + 9)) >= 0) {
@@ -516,6 +518,7 @@ static bool save() {
     fprintf(f, "upscale_quality = %s\nframe_gen = %d\n", k_uq_ini[g.uquality], g.frame_gen);
     fprintf(f, "depth_of_field = %d\n", g.dof);
     fprintf(f, "game_blur = %d\n", g.game_blur);
+    fprintf(f, "dlc = %d\n", g.dlc);
     if (g.anisotropy) fprintf(f, "anisotropy = %d\n", g.anisotropy);
     if (g.astc_mode) fprintf(f, "astc_decoder = cpu\n");
     if (g.present_mode == 2) fprintf(f, "vsync = immediate\n");
@@ -847,7 +850,7 @@ static void pc_poll() {
 // (tools/launcher/build.sh), so it starts before any tool is installed. The tools install and the build run in a job
 // object: Stop and closing the launcher end them with everything they started. The launcher's own exe is swapped by
 // tools/launcher/build.sh (renamed, not overwritten): the new one runs from the next start.
-static HANDLE g_bd_proc, g_bd_job, g_gf_proc, g_gf_pick, g_tl_proc;
+static HANDLE g_bd_proc, g_bd_job, g_gf_proc, g_gf_pick, g_dlc_pick, g_tl_proc;
 static int g_bd_step, g_tl_step, g_gf_code = -2;  // (game files: -2 not checked, -1 checking, else check_dump.py's exit code)
 static std::string g_bd_line, g_tl_line;
 static bool g_bd_new_launcher;
@@ -868,7 +871,7 @@ static bool tl_msys_ok() {  // (the libraries Build XC3.bat checks for)
 static bool bd_tools_ok() { return !bd_bash().empty() && exists(".venv/Scripts/python.exe") && tl_msys_ok(); }
 static bool tl_running() { return g_tl_proc != NULL; }
 static bool bd_running() { return g_bd_proc != NULL; }
-static bool gf_busy() { return g_gf_proc != NULL || g_gf_pick != NULL; }
+static bool gf_busy() { return g_gf_proc != NULL || g_gf_pick != NULL || g_dlc_pick != NULL; }
 
 // a hidden process in the repository root, its output in <log> (msys64 on the PATH, as Build XC3.bat; [XC3] its
 // usr\bin too, once: MSYS2's bash started directly, not as a login shell, finds sed / cp / mkdir there)
@@ -915,6 +918,26 @@ static void gf_pick() {
     std::string ps = std::string(sys) + "\\WindowsPowerShell\\v1.0\\powershell.exe";
     g_gf_pick = bd_spawn(ps, "-NoProfile -ExecutionPolicy Bypass -File tools\\setup_game_files.ps1", "build/setup_game_files.log", NULL);
     if (!g_gf_pick) g_status = std::string(T("No se pudo abrir el selector (error ")) + std::to_string(GetLastError()) + ")";
+}
+// [XC3] the add-on content (optional): tools/setup_game_files.ps1 -Dlc links targets\dlcs to the folder chosen
+static void dlc_pick() {
+    if (gf_busy() || bd_running()) return;
+    char sys[MAX_PATH] = "";
+    GetSystemDirectoryA(sys, sizeof sys);
+    std::string ps = std::string(sys) + "\\WindowsPowerShell\\v1.0\\powershell.exe";
+    g_dlc_pick = bd_spawn(ps, "-NoProfile -ExecutionPolicy Bypass -File tools\\setup_game_files.ps1 -Dlc", "build/setup_dlc.log", NULL);
+    if (!g_dlc_pick) g_status = std::string(T("No se pudo abrir el selector (error ")) + std::to_string(GetLastError()) + ")";
+}
+// the add-ons in targets/dlcs whose two archives are there ("1, 2, 3, 4"; empty: none), as runtime/services/misc.c lists them
+static std::string dlc_found() {
+    std::string s;
+    for (int i = 1; i <= 4; i++) {
+        char h[64], d[64];
+        snprintf(h, sizeof h, "targets/dlcs/bf3_dlc%02d.arh", i);
+        snprintf(d, sizeof d, "targets/dlcs/bf3_dlc%02d.ard", i);
+        if (exists(h) && exists(d)) s += (s.empty() ? "" : ", ") + std::to_string(i);
+    }
+    return s;
 }
 
 // the job object the tools install and the build run in (one at a time): closing the launcher ends what they started
@@ -1003,6 +1026,13 @@ static void bd_poll() {
         else if (code != 2) g_status = T("Esa carpeta no sirve (registro: build/setup_game_files.log)");
         gf_check();
     }
+    if (g_dlc_pick && WaitForSingleObject(g_dlc_pick, 0) == WAIT_OBJECT_0) {
+        GetExitCodeProcess(g_dlc_pick, &code);
+        CloseHandle(g_dlc_pick);
+        g_dlc_pick = NULL;
+        if (code == 0) g_status = T("DLC ready");
+        else if (code != 2) g_status = T("No DLC files in that folder (log: build/setup_dlc.log)");
+    }
     if (!g_bd_proc && !g_tl_proc) return;
     static Uint64 last;
     Uint64 now = SDL_GetTicks();
@@ -1066,6 +1096,20 @@ static void tab_build() {
     if (ImGui::Button(T("Elegir archivos del juego..."))) gf_pick();
     ImGui::EndDisabled();
     ImGui::SetItemTooltip(T("Elige la carpeta que contiene las carpetas exefs y romfs de tu copia del juego."));
+    // [XC3] the add-on content (optional; no rebuild needed: the game reads it at start)
+    section(T("DLC (optional)"));
+    std::string dl = dlc_found();
+    if (!dl.empty()) ImGui::TextColored(pal::accent, T("Found: DLC %s (targets/dlcs)"), dl.c_str());
+    else ImGui::TextDisabled("%s", T("No DLC files in targets/dlcs. The game runs without them."));
+    ImGui::BeginDisabled(gf_busy() || bd_running());
+    if (ImGui::Button(T("Choose DLC files..."))) dlc_pick();
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip(T("Choose the folder with your copy's DLC files (bf3_dlc01.arh, bf3_dlc01.ard, ... with movie and sound)."));
+    ImGui::SameLine();
+    ImGui::BeginDisabled(dl.empty());
+    ImGui::Checkbox(T("Use the DLC"), &g.dlc);
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip(T("Off: the game starts as if no DLC were installed. Saved with Save settings / Play."));
     section(T("Compilación"));
     ImGui::TextDisabled("%s", T("Recompila el código del juego y compila el runtime y el launcher (unos minutos; la primera vez, 10-20)."));
     if (bd_running()) {

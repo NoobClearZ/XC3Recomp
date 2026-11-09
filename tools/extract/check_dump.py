@@ -3,7 +3,7 @@
 Accepts a folder holding exefs/ and romfs/ (or --exefs/--romfs separately). Never reads encrypted containers
 (.nsp/.xci/.nca/.nsz/.xcz) and never opens key files (Constitution art. II).
 
-Exit codes: 0 ok, 1 usage, 2 container, 3 exefs, 4 version, 5 romfs.
+Exit codes: 0 ok, 1 usage, 2 container, 3 exefs, 4 version, 5 romfs; with --dlcs: 6 the DLC folder is not usable.
 """
 import argparse
 import json
@@ -15,7 +15,7 @@ from manifest import build_manifest  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import game  # noqa: E402
 
-ERR_OK, ERR_USAGE, ERR_CONTAINER, ERR_EXEFS, ERR_VERSION, ERR_ROMFS = 0, 1, 2, 3, 4, 5
+ERR_OK, ERR_USAGE, ERR_CONTAINER, ERR_EXEFS, ERR_VERSION, ERR_ROMFS, ERR_DLC = 0, 1, 2, 3, 4, 5, 6
 CONTAINER_EXT = ('.nsp', '.xci', '.nca', '.nsz', '.xcz')
 
 
@@ -119,18 +119,52 @@ def check_dump(path, profile, exefs=None, romfs=None):
     return r.fail(ERR_ROMFS, *msgs)
 
 
+DLC_MAX = 4
+
+
+def check_dlcs(path):
+    """[XC3] The add-on content folder (optional): the files of the add-ons, merged (bf3_dlc01..04.arh/.ard,
+    movie/, sound/). An add-on counts when both of its archives are there (runtime/services/misc.c lists the same).
+    Returns (found add-on numbers, problems)."""
+    found, problems = [], []
+    if not path or not os.path.isdir(path):
+        return found, ['The DLC folder is missing.']
+    for i in range(1, DLC_MAX + 1):
+        arh, ard = (os.path.join(path, f'bf3_dlc{i:02d}.{e}') for e in ('arh', 'ard'))
+        if os.path.isfile(arh) and os.path.isfile(ard):
+            found.append(i)
+        elif os.path.isfile(arh) or os.path.isfile(ard):
+            problems.append(f'  add-on {i}: only {os.path.basename(arh if os.path.isfile(arh) else ard)} (both .arh and .ard are needed)')
+    if not found and not problems:
+        problems.append('No DLC files (bf3_dlc01.arh / .ard ...) in that folder.')
+    return found, problems
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('dump', nargs='?')
     ap.add_argument('--exefs')
     ap.add_argument('--romfs')
+    ap.add_argument('--dlcs', help='check only an add-on content folder (exit 0 ok, 6 not usable)')
     ap.add_argument('--profile', default=game.path('profile.json'))
     a = ap.parse_args(argv)
+    if a.dlcs:
+        found, problems = check_dlcs(a.dlcs)
+        for m in problems:
+            print(m)
+        if found:
+            print('OK: DLC ' + ', '.join(map(str, found)) + ' found.')
+        return ERR_OK if found and not problems else ERR_DLC
     with open(a.profile, encoding='utf-8') as f:
         profile = json.load(f)
     res = check_dump(a.dump, profile, exefs=a.exefs, romfs=a.romfs)
     for m in res.messages:
         print(m)
+    if res.ok and a.dump and os.path.isdir(os.path.join(a.dump, 'dlcs')):  # (optional: never fails the dump)
+        found, problems = check_dlcs(os.path.join(a.dump, 'dlcs'))
+        print('DLC: ' + (', '.join(map(str, found)) if found else 'none'))
+        for m in problems:
+            print(m)
     return res.code
 
 

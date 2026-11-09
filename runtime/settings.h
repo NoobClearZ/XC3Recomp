@@ -75,6 +75,7 @@ typedef struct {
     bool frame_gen;      // [XCDE] FSR 3 / DLSS frame generation (xcde.ini frame_gen = 0/1)
     int ui_lang;         // [XC3] launcher and F1-menu language: permanently 1 (English)
     int stick_deadzone;  // [XCDE] % of the stick's travel read as centred (xcde.ini stick_deadzone = 0-30, default 0: raw)
+    bool dlc_off;        // [XC3] hide the add-on content in <dump>/dlcs from the game (xc3.ini dlc = 0; default 1: served if present)
     int cutscene_mode;   // [XCDE] T224: 0 cutscenes at the FPS setting, 1 at 30, 2 at 30 + FSR 3 frame generation (xcde.ini cutscenes = same|30|30fg)
 } Settings;
 

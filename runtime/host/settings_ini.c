@@ -88,6 +88,7 @@ void settings_load(void) {
         else if (!strcmp(k, "antialias")) g_settings.antialias = !strcmp(v, "smaa") ? AA_SMAA : AA_OFF;
         else if (!strcmp(k, "depth_of_field")) g_settings.dof_off = atoi(v) == 0;
         else if (!strcmp(k, "game_blur")) g_settings.game_blur = atoi(v) != 0;
+        else if (!strcmp(k, "dlc")) g_settings.dlc_off = atoi(v) == 0;
         else if (!strcmp(k, "vsync")) {
             if (!strcmp(v, "immediate") || !strcmp(v, "vrr") || !strcmp(v, "off") || !strcmp(v, "0")) {
                 g_settings.vsync = false;
@@ -147,6 +148,7 @@ void settings_save(void) {
             uq[g_settings.upscale_quality >= 0 && g_settings.upscale_quality <= 4 ? g_settings.upscale_quality : 1], g_settings.frame_gen);
     fprintf(f, "depth_of_field = %d\n", !g_settings.dof_off);
     fprintf(f, "game_blur = %d\n", g_settings.game_blur);
+    fprintf(f, "dlc = %d\n", !g_settings.dlc_off);
     if (g_settings.anisotropy) fprintf(f, "anisotropy = %d\n", g_settings.anisotropy);
     if (g_settings.astc_mode) fprintf(f, "astc_decoder = cpu\n");
     if (g_settings.present_mode == 2) fprintf(f, "vsync = immediate\n");

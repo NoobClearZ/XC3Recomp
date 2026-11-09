@@ -28,15 +28,17 @@ typedef struct { char *name, *path; uint64_t size, data_off; uint32_t off; Dir *
 struct Dir { char *name, *path; Dir *parent; Dir **dirs; File **files; int ndirs, nfiles; uint32_t off; };
 typedef struct { Dir **dirs; File **files; int nd, nf, cd, cf; } Lists;
 
-static uint8_t *g_hdr_tables;  // header (0x200) .. data gap .. tables are served from separate buffers below
-static uint8_t g_hdr[DATA_START];
-static uint8_t *g_tables;      // dir hash + dir meta + file hash + file meta, contiguous
-static uint64_t g_tables_off, g_tables_size, g_image_size, g_data_end;
-static File **g_files;         // sorted by data_off (table order)
-static int g_nfiles;
-static struct { int file; int fd; int users; uint64_t stamp; } g_fds[FD_CACHE];
-static pthread_mutex_t g_fd_lock = PTHREAD_MUTEX_INITIALIZER;  // [XCDE] the loader threads read concurrently (T108)
-static uint64_t g_stamp;
+// [XC3] One image per folder: the game's romfs, and the add-on content folder (services/fs.c, aoc mounts).
+struct Rvfs {
+    uint8_t hdr[DATA_START];     // header (0x200) .. data gap .. tables are served from separate buffers below
+    uint8_t *tables;             // dir hash + dir meta + file hash + file meta, contiguous
+    uint64_t tables_off, tables_size, image_size, data_end;
+    File **files;                // sorted by data_off (table order)
+    int nfiles;
+    struct { int file; int fd; int users; } fds[FD_CACHE];
+    pthread_mutex_t fd_lock;     // [XCDE] the loader threads read concurrently (T108)
+};
+static Rvfs g_main;              // the game's romfs (rvfs_init / rvfs_read / ...)
 
 static int by_name_dir(const void *a, const void *b) { return strcmp((*(Dir *const *)a)->name, (*(Dir *const *)b)->name); }
 static int by_name_file(const void *a, const void *b) { return strcmp((*(File *const *)a)->name, (*(File *const *)b)->name); }
@@ -284,10 +286,10 @@ static uint64_t align16(uint64_t x) { return (x + 15) & ~15ull; }
 static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 static void put64(uint8_t *p, uint64_t v) { memcpy(p, &v, 8); }
 
-bool rvfs_init(const char *dir, char *why, size_t why_size) {
+static bool build(Rvfs *v, const char *dir, bool mods, char *why, size_t why_size) {
     Dir *root = scan(dir, "", NULL, 0);
     if (!root) { snprintf(why, why_size, "cannot read %s", dir); return false; }
-    apply_mods(root);
+    if (mods) apply_mods(root);
     Lists l = {0};
     l.dirs = malloc(sizeof *l.dirs * 64), l.cd = 64;
     l.dirs[l.nd++] = root;
@@ -307,13 +309,13 @@ bool rvfs_init(const char *dir, char *why, size_t why_size) {
     uint32_t nbd = bucket_count((uint32_t)l.nd), nbf = bucket_count((uint32_t)l.nf);
     uint64_t dhash_off = (DATA_START + data + 3) & ~3ull;
     uint64_t dmeta_off = dhash_off + 4ull * nbd, fhash_off = dmeta_off + dsize, fmeta_off = fhash_off + 4ull * nbf;
-    g_tables_off = dhash_off;
-    g_tables_size = fmeta_off + fsize - dhash_off;
-    g_tables = calloc(1, g_tables_size);
-    uint32_t *dbuckets = (uint32_t *)g_tables;
-    uint8_t *dtab = g_tables + (dmeta_off - dhash_off);
-    uint32_t *fbuckets = (uint32_t *)(g_tables + (fhash_off - dhash_off));
-    uint8_t *ftab = g_tables + (fmeta_off - dhash_off);
+    v->tables_off = dhash_off;
+    v->tables_size = fmeta_off + fsize - dhash_off;
+    v->tables = calloc(1, v->tables_size);
+    uint32_t *dbuckets = (uint32_t *)v->tables;
+    uint8_t *dtab = v->tables + (dmeta_off - dhash_off);
+    uint32_t *fbuckets = (uint32_t *)(v->tables + (fhash_off - dhash_off));
+    uint8_t *ftab = v->tables + (fmeta_off - dhash_off);
     for (uint32_t i = 0; i < nbd; i++) dbuckets[i] = EMPTY;
     for (uint32_t i = 0; i < nbf; i++) fbuckets[i] = EMPTY;
     for (int i = 0; i < l.nd; i++) {
@@ -345,49 +347,60 @@ bool rvfs_init(const char *dir, char *why, size_t why_size) {
         fbuckets[h] = f->off;
     }
     uint64_t hv[10] = {0x50, dhash_off, 4ull * nbd, dmeta_off, dsize, fhash_off, 4ull * nbf, fmeta_off, fsize, DATA_START};
-    memcpy(g_hdr, hv, sizeof hv);
-    g_files = l.files;
-    g_nfiles = l.nf;
-    g_data_end = DATA_START + data;
-    g_image_size = g_tables_off + g_tables_size;
-    for (int i = 0; i < FD_CACHE; i++) g_fds[i].fd = -1, g_fds[i].file = -1;
+    memcpy(v->hdr, hv, sizeof hv);
+    v->files = l.files;
+    v->nfiles = l.nf;
+    v->data_end = DATA_START + data;
+    v->image_size = v->tables_off + v->tables_size;
+    for (int i = 0; i < FD_CACHE; i++) v->fds[i].fd = -1, v->fds[i].file = -1;
+    pthread_mutex_init(&v->fd_lock, NULL);
     free(l.dirs);
-    (void)g_hdr_tables;
     return true;
 }
 
-uint64_t rvfs_size(void) { return g_image_size; }
+bool rvfs_init(const char *dir, char *why, size_t why_size) { return build(&g_main, dir, true, why, why_size); }
+
+// [XC3] Another folder as its own image (no mods: they are laid over the game's romfs only).
+Rvfs *rvfs_open(const char *dir, char *why, size_t why_size) {
+    Rvfs *v = calloc(1, sizeof *v);
+    if (build(v, dir, false, why, why_size)) return v;
+    free(v);
+    return NULL;
+}
+
+uint64_t rvfs_isize(const Rvfs *v) { return v->image_size; }
+uint64_t rvfs_size(void) { return rvfs_isize(&g_main); }
 
 // [XCDE] T108: the cache used to be unlocked, so two threads whose files shared a slot closed each other's descriptor
 // mid-pread (-> read as zeros, or another file's bytes after the fd number was reused). A slot in use is never recycled:
 // the colliding reader gets a private descriptor instead. `*slot` is -1 for a private one.
-static int file_fd(int idx, int *slot) {
+static int file_fd(Rvfs *v, int idx, int *slot) {
     int s = idx % FD_CACHE, fd;
-    pthread_mutex_lock(&g_fd_lock);
-    if (g_fds[s].file == idx && g_fds[s].fd >= 0) {
-        g_fds[s].users++;
+    pthread_mutex_lock(&v->fd_lock);
+    if (v->fds[s].file == idx && v->fds[s].fd >= 0) {
+        v->fds[s].users++;
         *slot = s;
-        fd = g_fds[s].fd;
-    } else if (g_fds[s].users == 0) {
-        if (g_fds[s].fd >= 0) close(g_fds[s].fd);
-        g_fds[s].fd = open(g_files[idx]->path, O_RDONLY | O_BINARY_FLAG);
-        g_fds[s].file = idx;
-        g_fds[s].users = g_fds[s].fd >= 0;
-        *slot = g_fds[s].fd >= 0 ? s : -1;
-        fd = g_fds[s].fd;
+        fd = v->fds[s].fd;
+    } else if (v->fds[s].users == 0) {
+        if (v->fds[s].fd >= 0) close(v->fds[s].fd);
+        v->fds[s].fd = open(v->files[idx]->path, O_RDONLY | O_BINARY_FLAG);
+        v->fds[s].file = idx;
+        v->fds[s].users = v->fds[s].fd >= 0;
+        *slot = v->fds[s].fd >= 0 ? s : -1;
+        fd = v->fds[s].fd;
     } else {
         *slot = -1;
-        fd = open(g_files[idx]->path, O_RDONLY | O_BINARY_FLAG);
+        fd = open(v->files[idx]->path, O_RDONLY | O_BINARY_FLAG);
     }
-    pthread_mutex_unlock(&g_fd_lock);
+    pthread_mutex_unlock(&v->fd_lock);
     return fd;
 }
 
-static void file_fd_release(int fd, int slot) {
+static void file_fd_release(Rvfs *v, int fd, int slot) {
     if (slot >= 0) {
-        pthread_mutex_lock(&g_fd_lock);
-        g_fds[slot].users--;
-        pthread_mutex_unlock(&g_fd_lock);
+        pthread_mutex_lock(&v->fd_lock);
+        v->fds[slot].users--;
+        pthread_mutex_unlock(&v->fd_lock);
     } else if (fd >= 0) {
         close(fd);
     }
@@ -398,23 +411,23 @@ static void copy_mem(uint8_t *dst, uint64_t off, uint64_t n, const uint8_t *src,
 }
 
 // Reads `size` bytes at image offset `off` into dst; bytes outside any file or table read as zero. Returns bytes.
-int64_t rvfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
-    if (off >= g_image_size) return 0;
-    if (off + size > g_image_size) size = g_image_size - off;
+int64_t rvfs_iread(Rvfs *v, uint8_t *dst, uint64_t size, uint64_t off) {
+    if (off >= v->image_size) return 0;
+    if (off + size > v->image_size) size = v->image_size - off;
     uint64_t done = 0;
     while (done < size) {
         uint64_t o = off + done, n = size - done;
         if (o < DATA_START) {  // header
             if (n > DATA_START - o) n = DATA_START - o;
-            copy_mem(dst + done, o, n, g_hdr, 0);
-        } else if (o < g_data_end) {  // file data region
+            copy_mem(dst + done, o, n, v->hdr, 0);
+        } else if (o < v->data_end) {  // file data region
             uint64_t rel = o - DATA_START;
-            int lo = 0, hi = g_nfiles - 1, hit = -1;
+            int lo = 0, hi = v->nfiles - 1, hit = -1;
             while (lo <= hi) {  // last file whose data_off <= rel
                 int mid = (lo + hi) / 2;
-                if (g_files[mid]->data_off <= rel) hit = mid, lo = mid + 1; else hi = mid - 1;
+                if (v->files[mid]->data_off <= rel) hit = mid, lo = mid + 1; else hi = mid - 1;
             }
-            File *f = hit >= 0 ? g_files[hit] : NULL;
+            File *f = hit >= 0 ? v->files[hit] : NULL;
             {   // [XCDE] XCDE_TRACE_FILE=<a,b,..>: the first read of each file whose path holds one of the substrings is
                 // logged with the game frame and the host backtrace (guest functions f_<addr>): who loads maps / events
                 static const char *tf = (const char *)1;
@@ -439,10 +452,10 @@ int64_t rvfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
             } else if (f && rel < f->data_off + f->size) {
                 uint64_t in = rel - f->data_off, avail = f->size - in;
                 if (n > avail) n = avail;
-                int slot, fd = file_fd(hit, &slot);
+                int slot, fd = file_fd(v, hit, &slot);
                 ssize_t r = fd >= 0 ? pread(fd, dst + done, (size_t)n, (off_t)in) : -1;
-                file_fd_release(fd, slot);
-                if (r < 0) fprintf(stderr, "[romfs] read error %s +%llx (%llu bytes): zero-filled\n", g_files[hit]->path, (unsigned long long)in, (unsigned long long)n);
+                file_fd_release(v, fd, slot);
+                if (r < 0) fprintf(stderr, "[romfs] read error %s +%llx (%llu bytes): zero-filled\n", v->files[hit]->path, (unsigned long long)in, (unsigned long long)n);
                 if (r < 0) r = 0;
                 if ((uint64_t)r < n) memset(dst + done + r, 0, (size_t)(n - r));
                 for (int k = 0; k < f->npatch; k++) {  // [XC3] patched spans over what was read
@@ -456,15 +469,15 @@ int64_t rvfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
                     }
                 }
             } else {  // padding between files
-                uint64_t next = (hit + 1 < g_nfiles) ? DATA_START + g_files[hit + 1]->data_off : g_data_end;
+                uint64_t next = (hit + 1 < v->nfiles) ? DATA_START + v->files[hit + 1]->data_off : v->data_end;
                 if (n > next - o) n = next - o;
                 memset(dst + done, 0, (size_t)n);
             }
-        } else if (o < g_tables_off) {  // gap after the data
-            if (n > g_tables_off - o) n = g_tables_off - o;
+        } else if (o < v->tables_off) {  // gap after the data
+            if (n > v->tables_off - o) n = v->tables_off - o;
             memset(dst + done, 0, (size_t)n);
         } else {  // tables
-            copy_mem(dst + done, o, n, g_tables, g_tables_off);
+            copy_mem(dst + done, o, n, v->tables, v->tables_off);
         }
         done += n;
     }
@@ -472,13 +485,16 @@ int64_t rvfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
 }
 
 // Path of the file containing image offset `off` (NULL if none).
-const char *rvfs_file_at(uint64_t off) {
-    if (off < DATA_START || off >= g_data_end) return NULL;
+const char *rvfs_ifile_at(const Rvfs *v, uint64_t off) {
+    if (off < DATA_START || off >= v->data_end) return NULL;
     uint64_t rel = off - DATA_START;
-    int lo = 0, hi = g_nfiles - 1, hit = -1;
+    int lo = 0, hi = v->nfiles - 1, hit = -1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
-        if (g_files[mid]->data_off <= rel) hit = mid, lo = mid + 1; else hi = mid - 1;
+        if (v->files[mid]->data_off <= rel) hit = mid, lo = mid + 1; else hi = mid - 1;
     }
-    return hit >= 0 && rel < g_files[hit]->data_off + g_files[hit]->size ? g_files[hit]->path : NULL;
+    return hit >= 0 && rel < v->files[hit]->data_off + v->files[hit]->size ? v->files[hit]->path : NULL;
 }
+
+int64_t rvfs_read(uint8_t *dst, uint64_t size, uint64_t off) { return rvfs_iread(&g_main, dst, size, off); }
+const char *rvfs_file_at(uint64_t off) { return rvfs_ifile_at(&g_main, off); }
