@@ -2299,6 +2299,17 @@ static VkFormat vertex_format(uint32_t f) {
     }
 }
 
+// [XC3] the alignment Vulkan's vertex fetch needs for an NVN attribute format (vertex_format's codes): the size of one
+// component, of the whole word for packed formats
+static uint8_t vertex_comp_align(uint32_t fmt) {
+    if ((fmt >= 0x0A && fmt <= 0x0C) || (fmt >= 0x16 && fmt <= 0x18) || (fmt >= 0x22 && fmt <= 0x24) ||
+        (fmt >= 0x2E && fmt <= 0x30) || fmt == 0x3D || fmt == 0x69 || fmt == 0x3F || fmt == 0x40)
+        return 4;
+    if ((fmt >= 0x06 && fmt <= 0x09) || (fmt >= 0x11 && fmt <= 0x15) || (fmt >= 0x1D && fmt <= 0x21) || (fmt >= 0x29 && fmt <= 0x2D))
+        return 2;
+    return 1;
+}
+
 // 3-component 8/16-bit vertex formats aren't universally supported: read 4 components instead.
 static VkFormat vertex_format_supported(VkFormat f) {
     static uint8_t known[256];  // 1 ok, 2 not
@@ -5767,11 +5778,17 @@ static void draw_(CmdRec *r, bool indexed) {
     k.depth = pass_depth;
     k.stencil = pass_stencil;
     k.samples = pass_samples;
+    uint8_t s_align[16] = {0};  // [XC3] per stream: the largest component size of its attributes (vertex fetch alignment)
+    uint32_t restride[16] = {0};  // [XC3] streams repacked to an aligned stride: their guest stride (0: as is)
     for (int i = 0; i < 32; i++) {
         if (!(pr->vi->attr_mask & (1u << i))) continue;
         k.attr_mask |= 1u << i;
         uint32_t a = i < st.nattrib ? st.attrib[i] : 0x2E;
         uint32_t fmt = a & 0xFF, stream = (a >> 8) & 0x1F, off = a >> 13;
+        if (stream < 16) {
+            uint8_t al = vertex_comp_align(fmt);
+            if (al > s_align[stream]) s_align[stream] = al;
+        }
         if (i >= st.nattrib || fmt == 0 || stream >= 16) {  // unbound attribute: (0, 0, 0, 1) from a constant stream
             k.attr_fmt[i] = VK_FORMAT_R32G32B32A32_SFLOAT;
             k.attr_bind[i] = ZERO_BINDING;
@@ -5788,6 +5805,15 @@ static void draw_(CmdRec *r, bool indexed) {
         k.stride[s] = s < st.nstream ? st.stream[s][0] : 0;
         k.divisor[s] = s < st.nstream && k.stride[s] ? st.stream[s][1] : 0;
         if (k.divisor[s] > 1 && !g_vk.divisor) k.divisor[s] = 1;
+        // [XC3] Maxwell fetches attributes at any stride; Vulkan's fetch of a 32-bit component from a 2-byte aligned
+        // address is undefined (AMD read garbage). Future Redeemed's water uses stride 34 with an RGB32F position:
+        // every odd vertex broke, the water's triangles spanned the screen in front of the scene. Such streams are
+        // copied with the stride rounded up (the binding loop below) and the pipeline gets that stride.
+        uint32_t al = s_align[s];
+        if (k.stride[s] && al > 1 && k.stride[s] % al) {
+            restride[s] = k.stride[s];
+            k.stride[s] = (k.stride[s] + al - 1) / al * al;
+        }
     }
     for (uint32_t i = 0; i < k.ncolor && i < 8; i++) {
         if (!st.rt.color[i] || k.color[i] == VK_FORMAT_UNDEFINED) continue;
@@ -6163,7 +6189,10 @@ static void draw_(CmdRec *r, bool indexed) {
             dbg_vb_addr[s] = v.addr; dbg_vb_len[s] = v.size;
             VkBuffer dbuf;
             VkDeviceSize doff;
-            if (v.addr && v.size && guest_direct(v.addr, v.size, &dbuf, &doff)) {
+            // [XC3] a stream read in place must start 4-byte aligned: Maxwell fetches attributes from any address, but
+            // Vulkan's vertex fetch from an unaligned binding offset is undefined - AMD read garbage positions and Future
+            // Redeemed's meshes (2-byte aligned 32-bit floats in the pool) drew no pixel: grey scene. Those are copied.
+            if (v.addr && v.size && !(v.addr & 3) && !restride[s] && guest_direct(v.addr, v.size, &dbuf, &doff)) {
                 if (ss_on && (ss.vb_known >> s & 1) && ss.vb[s] == dbuf && ss.vo[s] == doff && ss.vsz[s] == v.size) continue;
                 ss.vb[s] = dbuf; ss.vo[s] = doff; ss.vsz[s] = v.size; ss.vb_known |= 1u << s;
                 // [XCDE] T173: bound with the stream's own size - fetches past it read 0 (robustBufferAccess2), as
@@ -6180,6 +6209,23 @@ static void draw_(CmdRec *r, bool indexed) {
                 if (base_vertex > 0) max_index += (uint32_t)base_vertex;
                 scan_src = NULL;
             }
+            if (restride[s] && v.addr) {  // [XC3] repacked to the aligned stride k.stride[s] (see the pipeline key)
+                uint64_t os = restride[s], ns = k.stride[s];
+                uint64_t nv = k.divisor[s] ? ((uint64_t)base_inst + inst + k.divisor[s] - 1) / k.divisor[s] : (uint64_t)max_index;
+                uint64_t have = v.size ? (v.size + os - 1) / os : nv;  // (vertices the stream holds, the last maybe partial)
+                if (nv > have) nv = have;
+                if (!nv) nv = 1;
+                sp = vk_transient(nv * ns, 16);
+                const uint8_t *src = (const uint8_t *)(uintptr_t)v.addr;
+                uint8_t *dst = sp.ptr;
+                for (uint64_t i = 0; i < nv; i++) {
+                    uint64_t at = i * os, n = v.size && at + os > v.size ? v.size - at : os;
+                    memcpy(dst + i * ns, src + at, n);
+                    if (n < ns) memset(dst + i * ns + n, 0, ns - n);
+                }
+                span_size = nv * ns;
+                goto bind_stream;
+            }
             uint64_t stride = k.stride[s], need;
             if (!stride) need = 256;
             else if (k.divisor[s]) need = ((uint64_t)base_inst + inst + k.divisor[s] - 1) / k.divisor[s] * stride + 256;
@@ -6192,6 +6238,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 span_size = req;
             }
         }
+    bind_stream:;
         VkDeviceSize off = sp.off;
         if (!g_vk.robust2) span_size = VK_WHOLE_SIZE;
         if (ss_on && (ss.vb_known >> s & 1) && ss.vb[s] == sp.buf && ss.vo[s] == off && ss.vsz[s] == span_size) continue;
