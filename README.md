@@ -46,7 +46,7 @@ The project is currently in active development (**Phases 1 & 2** of the [Roadmap
 - V-Sync toggle.
 
 **DLC (add-on content)**
-- The Expansion Pass add-ons and Future Redeemed are served from your own extracted DLC files (`<game folder>/dlcs`, see below): the game finds them as installed and mounts them. Future Redeemed can be started from the title screen, but its 3D scene does not render yet (see [Known issues](#known-issues)).
+- The Expansion Pass add-ons and Future Redeemed are served from your own extracted DLC files (`<game folder>/dlcs`, see below): the game finds them as installed and mounts them. Future Redeemed can be started from the title screen and plays.
 
 **Controls & UI**
 - Full Keyboard and Mouse support with camera mouse-look, plus configurable sensitivity and keybindings.
@@ -208,7 +208,6 @@ In game, **F1** opens the settings overlay.
 - **First visit to an area:** Shader and pipeline builds can still cause hitches of up to a few seconds the first time an area is entered on a fresh cache (measured by the tour); with the shaders cached, later visits hitch much less.
 - **Graphical quirks:**
   - Red / black box artifact near the Colony 9 waterfall (one draw call undergoing investigation).
-  - Future Redeemed: the 3D scene does not render (grey / empty background; the HUD, battles and movies work). It is in the renderer's GPU memory pool path, not the DLC loading; under investigation.
 - **DLC shaders:** the shader precompilation reads only the base game's archive, so the DLC's shaders build the first time they are seen.
 - **Memory scaling in long sessions:** Pipeline libraries and driver memory grow over multi-hour play sessions; restarting periodically resolves any accumulated stutter.
 - **Platform support:** Currently focused on Windows x86-64 with Vulkan 1.3.

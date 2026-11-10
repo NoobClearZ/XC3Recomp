@@ -31,11 +31,15 @@ Done:
 - The game's motion blur and TMAA as two switches (`motion_blur`, `game_taa`): `monolib/shader/lib_nx.bin` in
   `bf3.ard` is an "INIB" table (murmur3 key hashes) with XCDE's `lib_nx.ini` keys; `blur2` / `furBlur` / `tmaa` /
   `AntiAliasing` are set to 0 in a re-compressed copy of its block. TMAA is kept with FSR 3.1 / 4 / DLSS (their inputs).
+- Future Redeemed renders (`05bef4d`). Its grey / empty 3D scene and, after that, giant triangles with a swirl pattern
+  were vertex fetches Vulkan leaves undefined (AMD read garbage) where Maxwell reads any address: RGB32F positions at
+  2-byte aligned pool addresses (read in place since `59be42a`; now copied) and the water's stride of 34 (now copied
+  with the stride rounded up to its largest component, and the pipeline built with that stride). Checked with the FR
+  replay and ~19.5k frames of live play.
 
 Open:
-- Future Redeemed: its 3D scene does not render (grey / empty; HUD, battles, movies work), also without FSR 3 / 4.
-  `XC3_NO_PMEM=1` turns it into a blocky but visible scene, so it is in the pool / shader global memory path.
-  Repro: the replay `play/20261109_233911` on a copy of `save/backup/save_0_20261109_233913`, frame 2400.
+- Future Redeemed: occasional blocky (mosaic) patches seen once in a replay - not examined; one guest crash
+  (`f_7001192e00`, frame 907) in 1 of ~20 FR replays - not examined.
 - The DLC's shaders are not precompiled (precompile.c reads `bf3.ard` only); `bf3_dlc04.ard` has its own.
 - Black / red box by the Colony 9 waterfall: one draw (vs `61e0c6ed00`, fs `61e0c6f400`, G-buffer albedo pure red).
   Not caused by the alias-region pool reads (checked with `XC3_PMM_MIRROR=1`, deterministic replay). Cause open.
