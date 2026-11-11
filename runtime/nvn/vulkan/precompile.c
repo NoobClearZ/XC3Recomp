@@ -720,6 +720,11 @@ int vk_precompile_main(const char *root) {
     setenv("XCDE_PRECOMPILING", "1", 1);  // (shaders.c: no cache-miss log lines)
     setenv("LARECOMP_HIDDEN", "1", 1);
     ui_window_init();  // (the game's own Vulkan device - same driver caches - in a hidden window)
+    // [XC3] The seed's programs do get their libraries (below): the game links its pipelines from them, and with none
+    // built here every one was compiled by the driver in play on a cold driver cache (tour of 8 jump points from a
+    // freshly named exe: 148 draws waited 9.9 s for pipelines; with the seed's libraries 3 waited 0.1 s). The seed has
+    // the shader keys the game really draws with, so these are the libraries it asks for. XC3_PRECOMPILE_SEED_LIBS=0: off.
+    bool had_gpl = g_vk.gpl, seed_libs = !(getenv("XC3_PRECOMPILE_SEED_LIBS") && atoi(getenv("XC3_PRECOMPILE_SEED_LIBS")) == 0);
     if (!use_libs) g_vk.gpl = false;
     // The libraries go to the driver's own disk cache only, not to cache/vk_pipelines.bin: with them that file grew to
     // 698 MB, and the game reads it whole into memory at start (+0.7 GB on 8 GB PCs). The game's own builds of these
@@ -767,10 +772,13 @@ int vk_precompile_main(const char *root) {
     load_seed();  // [XCDE] T211
     if (nseed) {
         uint64_t ts0 = now_ns();
+        if (seed_libs) g_vk.gpl = had_gpl;  // [XC3] the seed's programs with their libraries (vk_precompile_program)
         for (int i = 0; i < nthreads; i++) pthread_create(&th[i], NULL, seed_worker, NULL);
         while (atomic_load(&next_seed) < nseed) { progress("seed", false); struct timespec ts = {0, 100000000}; nanosleep(&ts, NULL); }
         for (int i = 0; i < nthreads; i++) pthread_join(th[i], NULL);
-        printf("[precompile] seed: %zu variants, %llu built in %.1f s%c", nseed, (unsigned long long)n_seed_built, (now_ns() - ts0) / 1e9, 10);
+        if (!use_libs) g_vk.gpl = false;  // (the whole pipelines below are built as before)
+        printf("[precompile] seed: %zu variants, %llu built in %.1f s (%s)%c", nseed, (unsigned long long)n_seed_built, (now_ns() - ts0) / 1e9,
+               seed_libs && had_gpl ? "with their pipeline libraries" : "no pipeline libraries", 10);
     }
     if (nvar) {  // [XCDE] T240: the whole optimized pipelines (XCDE_PRECOMPILE_PIPELINES=0: pieces only, as before)
         const char *e = getenv("XCDE_PRECOMPILE_PIPELINES");

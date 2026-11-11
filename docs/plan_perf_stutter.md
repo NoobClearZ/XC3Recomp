@@ -1,6 +1,7 @@
 # Plan: fewer hitches, more frame rate (branch `perf-stutter`)
 
-Status: **Phase 0 measured** (2026-11-11, see "Baseline"); phases 1 and 2 not started. `main` (with the real-time
+Status: **Phase 0 measured** (2026-11-11, see "Baseline"), **1.0 done** (the seed's pipeline libraries in the
+precompile); the rest of phases 1 and 2 not started. `main` (with the real-time
 frame step and 2.2.1) is merged in.
 
 Sources: xc3-recomp (github.com/jmars125/xc3-recomp @ 2b88f29, MIT) `docs/architecture.md` and commits b26bb3a,
@@ -73,6 +74,28 @@ What it says for the phases:
   at exactly that and is the cheapest thing to measure.
 
 ## Phase 1: hitches
+
+1.0 **Done: the seed's pipeline libraries are built by the precompile** (precompile.c, `XC3_PRECOMPILE_SEED_LIBS=0`:
+    off). The cause of "precompiling does not warm the driver cache": XC3's precompile built SPIR-V and the seed's
+    whole pipelines but no pre-rasterization / fragment libraries (`g_vk.gpl` off unless `XCDE_PRECOMPILE_LIBS=1`),
+    and the game links its pipelines from those libraries, so on a cold driver cache the driver compiled every one
+    in play. The seed phase now builds them for its 6,729 program variants (the shader keys the game draws with).
+    Same tour, each from a freshly named exe after its own precompile:
+
+    | | cold (baseline) | probe run | this change |
+    |---|---|---|---|
+    | pipeline waits (ms) | 148 (9,931) | 3 (118) | 2 (70) |
+    | frames over 100 ms | 42 | 26 | 32 |
+    | worst frame, ms | 3,344 | 1,095 | 1,092 |
+    | 1% low fps | 4.4 | 9.3 | 7.5 |
+    | average fps | 53.8 | 57.4 | 56.6 |
+    | loading holds, ms | 8,344 | 6,921 | 9,405 |
+
+    Cost: the seed phase 64-70 s instead of building no libraries (a whole precompile 220-330 s here; 180 s before).
+    Not fixed: the loading holds on a cold cache (99 s over a whole run with boot and loading, 120 s without the
+    libraries, 3.7 s warm; "only long builds left"). What they wait for is not examined yet: programs outside the
+    seed, geometry-shader (shadow) programs or the optimized whole pipelines. The frames over 100 ms that are left
+    are those holds, not draws waiting.
 
 1.1 **Skip or wait for a pipeline that is not ready** (exec.c T174). Today a draw always waits for its pipeline
     (dropping it made objects flash black, ~18,000 draws in 6 minutes), so every first-time build is a hitch.

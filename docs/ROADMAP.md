@@ -95,6 +95,12 @@ Done:
 - Pipeline variant seed `data/variants_seed_xc3.bin` (`58c8f71`): 6,806 variants recorded in play (opening, Colony 9);
   precompilation builds 6,403 pipelines on an empty cache instead of 2,544. Extended with the map-jump tour's variants
   (maps 18-30): 13,689 variants, 13,116 pipelines built on an empty cache (0 failed, 24 s of the ~4 min).
+- First-visit pipeline hitches (branch `perf-stutter`, `docs/plan_perf_stutter.md`): the precompile built no
+  pre-rasterization / fragment pipeline libraries for XC3, which is what the game links its pipelines from, so a cold
+  driver cache (a new install, a new driver, a rebuilt exe) compiled each one in play. The seed's 6,729 program
+  variants now get theirs in the precompile (+~1 min): on a cold driver cache an 8-point tour had 148 draws waiting
+  9.9 s for pipelines before, 2 waiting 0.07 s after; worst frame 3.3 s -> 1.1 s. Left: the loading holds on a cold
+  cache (not examined). Measured with `XC3_FRAME_TIMES` + `tools/perf_compare.py` (frame times, 1% low).
 - Map-jump tour (`40a0d85`): `XCDE_TOUR` steps `jump <map> <point hash>` (the map menu's fast travel, request type 1)
   and `jumppos`, run in hidden batches by `tools/xc3_tour.py` (scratch save, per-point summary, captures). The jump
   list (`build/tours/xc3_jumps.txt`, from the game's own jump point table) is generated locally and never committed.
