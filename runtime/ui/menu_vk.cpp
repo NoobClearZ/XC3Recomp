@@ -245,10 +245,10 @@ static void ui(void) {
             static const char *fpsu[] = {"30 (like Switch)", "60", "120", "144", "165", "Unlimited"};
             int fi = 0;
             for (int i = 0; i < 6; i++) if (fpsv[i] == g_settings.fps) fi = i;
-            if (fi > 1) fi = 1;  // [XC3] 30 / 60 only (framepace.c xc3_fps_frame)
-            if (ImGui::Combo("FPS (after restart)", &fi, fpsu, 2)) {
+            // [XC3] above 30: the real-time frame step (framepace.c xc3_frame_present), chosen at boot
+            if (ImGui::Combo("FPS (after restart)", &fi, fpsu, 6)) {
                 g_settings.fps = fpsv[fi];
-                g_settings.frame_lag = (g_settings.fps == 60);  // [XC3] auto-enable frame lag with 60 fps
+                g_settings.frame_lag = (g_settings.fps != 30);  // [XC3] frame lag above 30 fps
             }
             static const char *aniso_names[] = {"Default", "2x", "4x", "8x", "16x (Recommended)"};
             static const int aniso_vals[] = {0, 2, 4, 8, 16};

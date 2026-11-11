@@ -69,7 +69,7 @@ typedef struct {
     int present_mode;    // [XC3] 0 = FIFO (V-Sync), 1 = Mailbox (Fast Sync), 2 = Immediate (V-Sync OFF / VRR)
     int anisotropy;      // [XC3] 0 = Default, 2..16 = Force Anisotropic Filtering (default: 16)
     int astc_mode;       // [XC3] 0 = Auto / GPU Compute (NVIDIA/AMD), 1 = CPU Software Fallback
-    bool frame_lag;      // [XC3] one frame in flight at 60 fps (xc3.ini frame_lag = 0/1, default 1; runtime/nvn/objects.c)
+    bool frame_lag;      // [XC3] one frame in flight above 30 fps (xc3.ini frame_lag = 0/1, default 1; runtime/nvn/objects.c)
     bool game_blur;      // [XCDE] the game's own AA / temporal AA / motion blur (lib_nx.ini; xcde.ini game_blur = 0/1)
     bool motion_blur;    // [XC3] the game's motion blur and fur blur (lib_nx.bin blur2 / furBlur; xc3.ini motion_blur = 0/1)
     bool game_taa;       // [XC3] the game's temporal AA (lib_nx.bin tmaa / AntiAliasing; xc3.ini game_taa = 0/1; kept with FSR 3 / 4 / DLSS)

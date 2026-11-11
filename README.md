@@ -26,7 +26,7 @@ the `XCDE_*` environment switches and `[XCDE]` comment markers keep their names 
 
 The project is currently in active development (**Phases 1 & 2** of the [Roadmap](docs/ROADMAP.md)):
 - **Playable areas:** The opening sequence, title screen, early cutscenes, and Colony 9 are running with full audio, video playback, and controls on Windows (tested on NVIDIA RTX and AMD GPUs). An automated map-jump tour (`tools/xc3_tour.py`) visits the game's fast-travel points: the first five field maps have been reached without a crash so far, the rest is being toured.
-- **Performance & graphics features:** In-place alias memory pool reads, multi-threaded Zstd-compressed SPIR-V shader cache reads, automatic ASTC GPU compute shader decoding, transform feedback draw support (`nvnCommandBufferDrawTransformFeedback`), GPU queue sync (`CMD_WAIT_SYNC`), shadow-pass async builds, forced 16x anisotropic filtering, and a 60 FPS mode with a frame-lag reduction option.
+- **Performance & graphics features:** In-place alias memory pool reads, multi-threaded Zstd-compressed SPIR-V shader cache reads, automatic ASTC GPU compute shader decoding, transform feedback draw support (`nvnCommandBufferDrawTransformFeedback`), GPU queue sync (`CMD_WAIT_SYNC`), shadow-pass async builds, forced 16x anisotropic filtering, and 60 FPS and above (real-time frame step) with a frame-lag reduction option.
 - **Under active work:** Visual fixes (e.g. Colony 9 waterfall draw artifact) and testing gameplay stability across later regions and extended battles. See [Known issues](#known-issues) and [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Features
@@ -41,8 +41,11 @@ The project is currently in active development (**Phases 1 & 2** of the [Roadmap
 - Shader precompilation: Ahead-of-time pipeline building to eliminate in-game shader compilation stutters. The SPIR-V cache is packed into `cache/spirv.pack`.
 
 **Frame rate**
-- 30 / 60 FPS options (the 60 FPS option is adapted from the community 60 FPS patch; cutscenes remain locked at a steady 30 FPS).
-- Automatic frame-lag reduction at 60 FPS: allows one frame in flight for lower latency, smoother frametimes, and holding 60 FPS in heavy areas.
+- 30 / 60 / 120 / 144 / 165 FPS or unlimited. Above 30 the game steps its world by the time each frame is actually
+  shown (adapted from [xc3-recomp](https://github.com/jmars125/xc3-recomp), MIT), so running and the world keep the
+  console's speed at any rate; cutscenes, story events and the title menus stay at a steady 30 FPS. Above 60 needs
+  V-Sync off or Fast Sync, or a monitor of that refresh rate.
+- Automatic frame-lag reduction above 30 FPS: one frame in flight for lower latency and smoother frametimes.
 - V-Sync toggle.
 
 **DLC (add-on content)**
@@ -189,8 +192,8 @@ Settings are managed via the launcher or directly in `xc3.ini` in the repository
 | `resolution` | `match`, `1`–`3`, `75%`, `50%`, `dynamic` | Rendering resolution scale |
 | `upscaler` | `bilinear`, `fsr`, `fsr3`, `fsr4`, `dlss` | Upscaling method (`fsr4` falls back to FSR 3.1 when its DLLs are missing) |
 | `upscale_quality` | `native`, `quality`, `balanced`, `performance`, `ultra` | Quality preset for temporal upscalers |
-| `fps` | `30`, `60` | Target framerate |
-| `frame_lag` | `0`, `1` | One frame in flight at 60 FPS to reduce latency |
+| `fps` | `30`, `60`, `120`, `144`, `165`, `unlimited` | Target framerate (above 30: real-time frame step; `XC3_REALTIME=0` uses the old 60 FPS patch path) |
+| `frame_lag` | `0`, `1` | One frame in flight above 30 FPS to reduce latency |
 | `vsync` | `0`, `1` | Vertical sync |
 | `cutscenes` | `same`, `30`, `30fg` | Framerate behaviour during cutscenes |
 | `antialias` | `smaa`, `off` | Post-process anti-aliasing |

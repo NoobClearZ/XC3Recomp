@@ -924,8 +924,27 @@ NVN(nvnQueueAcquireTexture) {
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
-    extern void backend_queue_present(NvnTexture *t);
-    if (i >= 0 && i < w->num) { if (backend_async()) backend_queue_present(HOST(NvnTexture, w->textures[i])); else backend_present(HOST(NvnTexture, w->textures[i])); }
+    extern uint64_t backend_queue_present(NvnTexture *t);
+    extern bool xc3_frame_present(void);
+    // [XC3] above 30 fps (runtime/hle/framepace.c): the present is held to the limit and the frame step measured here.
+    // The game's limiter returns at once then, so its end-of-frame wait for the GPU (the frame lag hook in nvnSyncWait,
+    // lr 700124fb70) does not run either: the frame lag is kept here. On (the default): the worker has taken the
+    // previous present (one frame in flight); off: this one. The worker queues at most 2 presents in any case.
+    bool rt = xc3_frame_present();
+    if (i >= 0 && i < w->num) {
+        if (backend_async()) {
+            uint64_t ticket = backend_queue_present(HOST(NvnTexture, w->textures[i]));
+            static uint64_t prev;
+            if (rt) {
+                extern void backend_wait_ticket(uint64_t ticket);
+                uint64_t wait = g_settings.frame_lag ? prev : ticket;
+                if (wait) backend_wait_ticket(wait);
+            }
+            prev = ticket;
+        } else {
+            backend_present(HOST(NvnTexture, w->textures[i]));
+        }
+    }
     if (getenv("XCDE_LOG_PACE")) {  // [XCDE] vsyncs between presents (the game's real frame interval)
         extern volatile uint64_t g_vsync_count;
         static uint64_t last, n;

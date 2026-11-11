@@ -96,7 +96,7 @@ struct Cfg {
     int present_mode = 0;   // [XC3] 0 = FIFO, 1 = Mailbox, 2 = Immediate (VRR)
     int anisotropy = 16;    // [XC3] 0 = Default, 2..16 Forced Anisotropic Filtering (default: 16)
     int astc_mode = 0;     // [XC3] 0 = GPU Compute Shader (Fast), 1 = CPU Software Fallback
-    bool frame_lag = true;  // [XC3] one frame in flight at 60 fps (runtime/nvn/objects.c)
+    bool frame_lag = true;  // [XC3] one frame in flight above 30 fps (runtime/nvn/objects.c)
     int cutscenes = 0;      // T224: 0 at the FPS setting, 1 at 30 (xcde.ini cutscenes = same | 30)
     bool cut_fg = false;    // T224: cutscenes at 30 + frame generation, gameplay without it (xcde.ini cutscenes = 30fg)
     bool party_switch = false;  // party mod: switch the controlled character (F2 / L2 + L1 / R1), runtime/hle/party.c
@@ -221,9 +221,11 @@ static const char *const k_en[][2] = {
      "de la ventana). Rendimiento = la del juego original (la mitad); Nativo = la de la ventana.",
      "The resolution the scene is rendered at before reconstruction (percentage of the window's\n"
      "side). Performance = the original game's (half); Native = the window's."},
-    {"60: el juego a 60 FPS fuera de las cinemáticas (que siguen a 30), como el parche de 60 FPS\n"
-     "de la comunidad. Necesita una GPU que lo mantenga: en zonas pesadas ayuda FSR en Rendimiento.",
-     "60: the game at 60 FPS outside cutscenes (they stay at 30), as the community 60 FPS patch.\n"
+    {"60 o más: el juego a esa velocidad fuera de las cinemáticas (que siguen a 30), con el tiempo del juego\n"
+     "medido en cada imagen: correr y el mundo van a la velocidad de la consola a cualquier FPS.\n"
+     "Necesita una GPU que lo mantenga: en zonas pesadas ayuda FSR en Rendimiento.",
+     "60 or more: the game at that rate outside cutscenes (they stay at 30), with game time measured\n"
+     "each frame: running and the world move at the console's speed at any FPS.\n"
      "Needs a GPU that holds it: in heavy areas FSR on Performance helps."},
     {"Los iconos de los botones del juego: Xbox (A B X Y, LB RB LT RT), PlayStation (símbolos,\n"
      "L1 R1 L2 R2) o las teclas asignadas, según los controles. Se aplica al iniciar el juego.",
@@ -506,7 +508,7 @@ static void load() {
         else if (!strcmp(k, "button_icons") && (i = find(k_icon_ini, 5, v)) >= 0) g.icons = i;
     }
     fclose(f);
-    g.frame_lag = (g.fps == 1);  // [XC3] 60 fps automatically enables frame lag
+    g.frame_lag = (g.fps != 0);  // [XC3] frame lag above 30 fps
     if (layout < 2) for (int i = 0; i < NACT; i++) g.key[i] = k_def_key[i], g.key2[i] = k_def_key2[i];
 }
 
@@ -517,7 +519,7 @@ static bool save() {
     fprintf(f, "fullscreen = %d\nwindow = %s\nresolution = %s\nupscaler = %s\nantialias = %s\nshow_fps = %d\n", g.fullscreen,
             k_wins[g.win], k_res_ini[g.res], k_ups_ini[g.upscaler], g.smaa ? "smaa" : "off", g.show_fps);
     g.frame_gen = g.cut_fg = false;  // [XC3] not offered (see the upscaler options)
-    g.frame_lag = (g.fps == 1);      // [XC3] 60 fps automatically enables frame lag
+    g.frame_lag = (g.fps != 0);      // [XC3] frame lag above 30 fps
     fprintf(f, "upscale_quality = %s\nframe_gen = %d\n", k_uq_ini[g.uquality], g.frame_gen);
     fprintf(f, "depth_of_field = %d\n", g.dof);
     fprintf(f, "motion_blur = %d\ngame_taa = %d\n", g.motion_blur, g.game_taa);
@@ -1270,13 +1272,14 @@ static void tab_graphics() {
                           "sin costo apreciable en GPUs modernas."));
     section(T("Velocidad"));
     static const char *fps_ui[] = {"30 (como en Switch)", "60", "120", "144", "165", "Sin límite"};
-    // [XC3] 30 / 60 only (runtime/hle/framepace.c xc3_fps_frame: the 60 fps cheat's interval and frame time)
-    if (g.fps > 1) g.fps = 1;
-    if (ImGui::Combo("FPS", &g.fps, TL(fps_ui, 2).p, 2)) {
-        g.frame_lag = (g.fps == 1);  // [XC3] auto-enable frame lag (one frame in flight) when 60 fps is active
+    // [XC3] above 30: the real-time frame step (runtime/hle/framepace.c xc3_frame_present)
+    if (g.fps < 0 || g.fps > 5) g.fps = 1;
+    if (ImGui::Combo("FPS", &g.fps, TL(fps_ui, 6).p, 6)) {
+        g.frame_lag = (g.fps != 0);  // [XC3] frame lag (one frame in flight) above 30
     }
-    ImGui::SetItemTooltip(T("60: el juego a 60 FPS fuera de las cinemáticas (que siguen a 30), como el parche de 60 FPS\n"
-                          "de la comunidad. Necesita una GPU que lo mantenga: en zonas pesadas ayuda FSR en Rendimiento."));
+    ImGui::SetItemTooltip(T("60 o más: el juego a esa velocidad fuera de las cinemáticas (que siguen a 30), con el tiempo del juego\n"
+                          "medido en cada imagen: correr y el mundo van a la velocidad de la consola a cualquier FPS.\n"
+                          "Necesita una GPU que lo mantenga: en zonas pesadas ayuda FSR en Rendimiento."));
     static const char *vs_names[] = {"V-Sync ON (FIFO)", "Fast Sync (Mailbox)", "V-Sync OFF / VRR (Immediate)"};
     int vsi = g.present_mode >= 0 && g.present_mode <= 2 ? g.present_mode : (!g.vsync ? 2 : 0);
     ImGui::SetNextItemWidth(300 * g_scale);

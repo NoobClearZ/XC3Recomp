@@ -29,6 +29,12 @@ _Static_assert(offsetof(Cpu, v) == 512, "v");
 
 typedef void (*GuestFn)(Cpu *);
 
+// [XC3] frame rate above 60 (runtime/hle/framepace.c), read by the patched sites of games/xc3/patches.py
+extern volatile int xc3_rt_on, xc3_rt_menus;   // the real-time frame step / the interface's step scaled by it
+extern volatile int32_t xc3_rt_fps;            // the frame rate the step makes, rounded
+extern volatile float xc3_rt_step, xc3_rt_ratio;   // the step in seconds / in 30 fps frames
+extern volatile uint64_t xc3_rt_obj;           // the frame-step update's object (its +0x1fc bit 2: a fixed step)
+
 // ---- runtime services (runtime/*.c)
 void rt_dispatch(Cpu *c);                 // call function at c->pc
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);

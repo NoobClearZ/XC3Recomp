@@ -129,7 +129,7 @@ void settings_load(void) {
         else bind_settings_load(k, v);
     }
     fclose(f);
-    g_settings.frame_lag = (g_settings.fps == 60);
+    g_settings.frame_lag = (g_settings.fps != 30);  // [XC3] above 30 fps
     if (g_window_w < 320) g_window_w = 320;
     if (g_window_h < 180) g_window_h = 180;
     if (g_settings.volume < 0) g_settings.volume = 0;
@@ -139,7 +139,7 @@ void settings_load(void) {
 void settings_save(void) {
     FILE *f = fopen(ini_path(), "w");
     if (!f) return;
-    g_settings.frame_lag = (g_settings.fps == 60);
+    g_settings.frame_lag = (g_settings.fps != 30);  // [XC3] above 30 fps
     static const char *res[] = {"match", "1", "2", "3", "4", "5", "6", "7", "8", "dynamic", "75%", "25%", "50%"};
     fprintf(f, "# XC3Recomp settings (the launcher writes this file)\n");
     fprintf(f, "fullscreen = %d\nwindow = %dx%d\n", g_settings.fullscreen, g_window_w, g_window_h);

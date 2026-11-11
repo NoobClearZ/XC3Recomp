@@ -7713,7 +7713,7 @@ static void scan_fences(uint64_t handle, uint64_t ticket, int depth) {
 
 void backend_queue_execute(uint64_t handle) { rq_push(RJ_EXEC, handle); }
 uint64_t backend_queue_fence(uint64_t guest_sync) { return rq_push(RJ_FENCE, guest_sync); }
-void backend_queue_present(NvnTexture *t) { rq_push(RJ_PRESENT, (uint64_t)(uintptr_t)t); }
+uint64_t backend_queue_present(NvnTexture *t) { return rq_push(RJ_PRESENT, (uint64_t)(uintptr_t)t); }  // (its ticket)
 void backend_queue_destroy(NvnTexture *t) { rq_push(RJ_DESTROY, (uint64_t)(uintptr_t)t); }
 
 void backend_execute(uint64_t handle) {
