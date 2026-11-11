@@ -17,6 +17,10 @@
 
 const char *g_romfs_dir;
 const char *g_dlc_dir;
+// [XC3] The version the title screen shows (am GetDisplayVersion). 2.2.1 has the code and romfs of 2.2.0; only
+// main.npdm differs (its ACID signature and key, bytes 0x80-0x27f), so its SHA-256 is what tells them apart.
+const char *g_display_version = "2.2.0";
+#define NPDM_SHA256_2_2_1 "45a8ecf07093d0b6a60c9ef3c2199bf4398c15bb453017a449a2d7690d433b7f"
 
 #ifdef XCDE_GFX
 // [XCDE] T194: laptops with two GPUs (NVIDIA Optimus / AMD switchable graphics) run a program on the integrated one
@@ -25,6 +29,33 @@ const char *g_dlc_dir;
 __declspec(dllexport) DWORD NvOptimusEnablement = 1;
 __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #endif
+
+// [XC3] SHA-256 of a small file as hex (advapi32), for the boot log: main.npdm is the one exefs file that differs
+// between 2.2.0 and 2.2.1, so a log tells the two apart. hex stays "" when the file or the hash is not available.
+#include <wincrypt.h>
+static void file_sha256(const char *path, char hex[65], long *size) {
+    hex[0] = 0;
+    *size = -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    HCRYPTPROV prov = 0;
+    HCRYPTHASH h = 0;
+    uint8_t buf[4096], dig[32];
+    DWORD dn = sizeof dig;
+    size_t n;
+    long total = 0;
+    if (CryptAcquireContextA(&prov, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) && CryptCreateHash(prov, CALG_SHA_256, 0, 0, &h)) {
+        bool ok = true;
+        while (ok && (n = fread(buf, 1, sizeof buf, f)) > 0) ok = CryptHashData(h, buf, (DWORD)n, 0), total += (long)n;
+        if (ok && CryptGetHashParam(h, HP_HASHVAL, dig, &dn, 0) && dn == sizeof dig) {
+            for (int i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", dig[i]);
+            *size = total;
+        }
+    }
+    if (h) CryptDestroyHash(h);
+    if (prov) CryptReleaseContext(prov, 0);
+    fclose(f);
+}
 
 static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
     for (uint64_t i = 0; i < size / 8; i++) {
@@ -147,6 +178,13 @@ int main(int argc, char **argv) {
     }
     kernel_set_system_resource_size(sys_resource);
     LOG("main thread: prio %d, stack 0x%x, system resource 0x%x\n", prio, stack_size, sys_resource);
+    {   // [XC3] which update the dump is (2.2.0 and 2.2.1 differ in main.npdm only)
+        char hex[65];
+        long size;
+        file_sha256(npdm_path, hex, &size);
+        if (!strcmp(hex, NPDM_SHA256_2_2_1)) g_display_version = "2.2.1";
+        LOG("main.npdm: sha256 %s, %ld bytes: version %s\n", hex[0] ? hex : "(not available)", size, g_display_version);
+    }
 
     uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_");
     uint64_t start3 = start ? 0 : loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_S2_");  // [XC3] three callbacks
