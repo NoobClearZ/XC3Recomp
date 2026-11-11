@@ -55,14 +55,18 @@ Done:
 - FPS option 30 / 60 (60 = the community 60 FPS patch, ported; cutscenes stay at 30). 120 was tried and dropped:
   movement ran too fast: the cheat path writes the world step with a floor of 1/60 s, and the game's frame-step update
   (`f_700000f3c0`) clamps the measured time to at least 1 / (60 / vsync count).
-- Above 30 (60 to 165, unlimited; branch `fps-realtime`, **untested in play**): xc3-recomp's real-time frame step
+- Above 30 (60 to 165, unlimited; `30e80ac`): xc3-recomp's real-time frame step
   (MIT, `2b88f29`). Four patched sites (`games/xc3/patches.py`, fps-realtime) make the step update take its rate and
   step from the host and the main loop's limiter (`f_700124fa34`) return at once; 13 sites scale the interface's
   per-frame step (`XC3_MENU_TIME=0`: off). `framepace.c xc3_frame_present` (called from `nvnQueuePresentTexture`)
   holds each present to the limit, steps by the average of the last 5 present intervals (at most 1/15 s), and holds
   cutscenes, story events and title menus at 30. The frame lag moved there too (the limiter's GPU wait no longer runs).
-  Off at 30, in deterministic runs and with `XC3_REALTIME=0`. To check: Colony 9 at 30 / 60 / 120 / 144 (running
-  speed the same), cutscene lip sync, menu / HUD animation speed, old replays.
+  Off at 30, in deterministic runs and with `XC3_REALTIME=0`. Built on Windows and run hidden from the base save
+  (Colony 9, 2026-11-11): the 120 option gave ~100 fps (boot logos 118, title menu held at 30) and the game's clock
+  ran 0.98 game minutes per second against 1.00 at the 30 option, so the world keeps its speed; no crash. Then played
+  by the user (not recorded) and merged at their request. Frame-numbered replays recorded at 30 do not fit above 30
+  (the boot logos run faster, the inputs land early). Not measured: 60 / 144 / 165 / unlimited, battles, cutscene lip
+  sync, menu / HUD animation speed.
 - Alias-region streams read from the pool in place (`59be42a`): Colony 9 at the 30 option 18 -> 29 fps (capped),
   GPU 37 -> 12 ms per frame.
 - Session recording without capture freezes (`3e8e0ca`).
