@@ -99,7 +99,7 @@ Write-Host "romfs: $($found.romfs)"
 & $py -X utf8 "$root\tools\extract\check_dump.py" --exefs $found.exefs --romfs $found.romfs
 if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -eq 4) { Write-Host 'XC3Recomp needs version 2.2.0 or 2.2.1: the base game with that update applied.' }
-    elseif ($LASTEXITCODE -eq 5) { Write-Host 'Some romfs files are missing or different, usually from a copy or extraction that stopped partway, or a romfs without the 2.2.0 update. Get the game files again, then choose the folder again.' }
+    elseif ($LASTEXITCODE -eq 5) { Write-Host 'Some romfs files are missing or different, usually from a copy or extraction that stopped partway, or a romfs without the 2.2.0 or 2.2.1 update. Get the game files again, then choose the folder again.' }
     exit 1
 }
 

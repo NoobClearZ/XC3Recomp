@@ -55,14 +55,18 @@ Done:
 - FPS option 30 / 60 (60 = the community 60 FPS patch, ported; cutscenes stay at 30). 120 was tried and dropped:
   movement ran too fast: the cheat path writes the world step with a floor of 1/60 s, and the game's frame-step update
   (`f_700000f3c0`) clamps the measured time to at least 1 / (60 / vsync count).
-- Above 30 (60 to 165, unlimited; branch `fps-realtime`, **untested in play**): xc3-recomp's real-time frame step
+- Above 30 (60 to 165, unlimited; `30e80ac`): xc3-recomp's real-time frame step
   (MIT, `2b88f29`). Four patched sites (`games/xc3/patches.py`, fps-realtime) make the step update take its rate and
   step from the host and the main loop's limiter (`f_700124fa34`) return at once; 13 sites scale the interface's
   per-frame step (`XC3_MENU_TIME=0`: off). `framepace.c xc3_frame_present` (called from `nvnQueuePresentTexture`)
   holds each present to the limit, steps by the average of the last 5 present intervals (at most 1/15 s), and holds
   cutscenes, story events and title menus at 30. The frame lag moved there too (the limiter's GPU wait no longer runs).
-  Off at 30, in deterministic runs and with `XC3_REALTIME=0`. To check: Colony 9 at 30 / 60 / 120 / 144 (running
-  speed the same), cutscene lip sync, menu / HUD animation speed, old replays.
+  Off at 30, in deterministic runs and with `XC3_REALTIME=0`. Built on Windows and run hidden from the base save
+  (Colony 9, 2026-11-11): the 120 option gave ~100 fps (boot logos 118, title menu held at 30) and the game's clock
+  ran 0.98 game minutes per second against 1.00 at the 30 option, so the world keeps its speed; no crash. Then played
+  by the user (not recorded) and merged at their request. Frame-numbered replays recorded at 30 do not fit above 30
+  (the boot logos run faster, the inputs land early). Not measured: 60 / 144 / 165 / unlimited, battles, cutscene lip
+  sync, menu / HUD animation speed.
 - Alias-region streams read from the pool in place (`59be42a`): Colony 9 at the 30 option 18 -> 29 fps (capped),
   GPU 37 -> 12 ms per frame.
 - Session recording without capture freezes (`3e8e0ca`).
@@ -137,18 +141,22 @@ Done:
 - Release zip built by CI (`.github/workflows/release.yml`, on a pushed tag `v*`): the repository at that tag plus a
   prebuilt `build/xenoblade3_launcher.exe` (package_guard checked), so a new user extracts it and starts the launcher:
   no bat at all.
+- Update 2.2.1 (June 2025, adjustments for Nintendo Switch 2) accepted, nothing to port (`8baba85`). Its `main`, `sdk`,
+  `subsdk0` and `rtld` have the SHA-256 of our 2.2.0 dump (checked against xc3-recomp's
+  `tools/data/expected-xc3-2.2.1.json`), and the RomFS image size it lists (15,194,654,528) is the one our 250 files
+  (names and sizes) make; only `main.npdm` differs, read at boot for the system resource size. `check_dump.py` skips
+  `.DS_Store` / `._*` / `Thumbs.db` / `desktop.ini` in the romfs: a dump copied through a Mac failed with one extra file.
+  Checked with a real 2.2.1 dump (2026-11-11): the four modules, `bf3.arh` and `bf3.ard` have the SHA-256 of the 2.2.0
+  ones; `main.npdm` differs in bytes 0x80-0x27f only (the start of its ACID section), not in the header the runtime
+  reads (priority, stack, system resource size); a played session applied the `lib_nx.bin` and button atlas patches at
+  the 2.2.0 offsets. The boot log names the version (`main.npdm: sha256 ..., version ...`) and `GetDisplayVersion`
+  answers 2.2.1 for that `main.npdm`, 2.2.0 otherwise (the title screen's version text).
 
 Open:
 - Choosing an install folder other than the repository.
 - Extraction from the user's own game packages (today: already extracted `exefs` / `romfs` folders only).
 - DLC folder in the launcher's Install & build tab (status, folder picker, "Use the DLC"), linked by
   `setup_game_files.ps1` (`-Dlc`) as `targets\dlcs` and checked by `check_dump.py --dlcs` (`e12d217`).
-- Update 2.2.1 (June 2025, adjustments for Nintendo Switch 2): supported, nothing to port. Its `main`, `sdk`,
-  `subsdk0` and `rtld` have the SHA-256 of our 2.2.0 dump (checked against xc3-recomp's
-  `tools/data/expected-xc3-2.2.1.json`), and the RomFS image size it lists (15,194,654,528) is the one our 250 files
-  (names and sizes) make; only `main.npdm` differs, read at boot for the system resource size. `GetDisplayVersion`
-  still answers 2.2.0 (the two cannot be told apart by code). `check_dump.py` skips `.DS_Store` / `._*` /
-  `Thumbs.db` / `desktop.ini` in the romfs: a dump copied through a Mac failed with one extra file.
 - Installation management.
 
 ## Phase 4: Public source and testing
