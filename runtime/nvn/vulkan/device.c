@@ -1295,6 +1295,24 @@ void backend_present(NvnTexture *t) {
     if (fps_iv < 0) fps_iv = getenv("LARECOMP_FPS_INTERVAL") ? atof(getenv("LARECOMP_FPS_INTERVAL")) : 2.0;
     if (prev_present > 0 && now - prev_present > max_gap) max_gap = now - prev_present;
     prev_present = now;
+    {   // [XC3] XC3_FRAME_TIMES=<file>: one line per present, "<frame> <microseconds since the last present>", for
+        // tools/perf_compare.py (1% low, frames over 25 / 100 ms: the [vk] line only has a 2 s average and maximum)
+        static FILE *ft;
+        static int ft_on = -1;
+        static uint64_t ft_last;
+        if (ft_on < 0) {
+            const char *e = getenv("XC3_FRAME_TIMES");
+            ft = e && *e ? fopen(e, "w") : NULL;
+            ft_on = ft != NULL;
+            if (ft) setvbuf(ft, NULL, _IOFBF, 1 << 16);
+        }
+        if (ft_on) {
+            uint64_t ns = SDL_GetTicksNS();
+            if (ft_last) fprintf(ft, "%llu %llu\n", (unsigned long long)total_frames, (unsigned long long)((ns - ft_last) / 1000));
+            ft_last = ns;
+            if ((total_frames & 255) == 0) fflush(ft);  // (a run that is killed or _exit()s keeps all but the last frames)
+        }
+    }
     if (now - last_fps_time >= fps_iv) {
         extern const char *game_level_name(void);
         if (last_fps_time > 0)

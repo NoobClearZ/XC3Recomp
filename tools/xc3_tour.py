@@ -77,6 +77,7 @@ def main():
     ap.add_argument('--exe', default=os.path.join(REPO, 'build', 'xc3.exe'))
     ap.add_argument('--out', default=None, help='default: build/tour_runs/<date_time>')
     ap.add_argument('--shots', action='store_true', help='a capture after each jump (XCDE_TOUR_SHOT_AUTO)')
+    ap.add_argument('--frame-times', action='store_true', help='every frame time into chunkNN/frames.txt (XC3_FRAME_TIMES; tools/perf_compare.py)')
     ap.add_argument('--env', action='append', default=[], help='extra NAME=VALUE for the game (repeatable)')
     ap.add_argument('--timeout', type=float, default=0, help='seconds per run (default: from the steps; more after a shader change)')
     a = ap.parse_args()
@@ -112,6 +113,8 @@ def main():
                    LARECOMP_SAVE_DIR=saves, LARECOMP_HIDDEN='1', LARECOMP_AUDIO_GAIN='0')
         if a.shots:
             env.update(XCDE_TOUR_SHOT_AUTO='1', XCDE_TOUR_SHOTS=os.path.join(work, 'shots'))
+        if a.frame_times:
+            env['XC3_FRAME_TIMES'] = os.path.join(work, 'frames.txt')
         for kv in a.env:
             k, _, v = kv.partition('=')
             env[k] = v
