@@ -17,8 +17,8 @@ tooling and configuration are specialized for XC3 (`Build XC3.bat`, `Play XC3.ba
 the `XCDE_*` environment switches and `[XCDE]` comment markers keep their names (where the code came from).
 
 > [!NOTE]
-> **No game files are included.** You need your own legally obtained copy of the game, **version 2.2.0** (the base
-> game with the 2.2.0 update applied), extracted to an `exefs` folder and a `romfs` folder. Instructions on how to
+> **No game files are included.** You need your own legally obtained copy of the game, **version 2.2.0 or 2.2.1** (the
+> base game with that update applied), extracted to an `exefs` folder and a `romfs` folder. Instructions on how to
 > obtain or extract these files will **not** be provided. Everything derived from the game (the recompiled code,
 > translated shaders, caches) is generated on your own machine and never belongs in this repository.
 
@@ -80,8 +80,10 @@ You need the game files extracted from your own copy of **Xenoblade Chronicles 3
 
 **Format:** Plain extracted folders, not packages. Archives such as `.nsp`, `.xci`, `.nca`, `.nsz`, or `.xcz` are rejected.
 
-**Version:** Exactly **2.2.0** (title ID `010074f013262000`). This requires the base game with the 2.2.0 update applied:
-- `exefs/` must match version 2.2.0:
+**Version:** **2.2.0** or **2.2.1** (title ID `010074f013262000`): the base game with either update applied. 2.2.1
+(June 2025, adjustments for Nintendo Switch 2) has the same `main`, `sdk`, `subsdk0` and `rtld` as 2.2.0 and romfs files
+of the same names and sizes; `main.npdm` differs. Both pass the same check and build the same game.
+- `exefs/` must have these build-ids:
   - `main` (build-id `82d187fe9ef9be92`)
   - `main.npdm`
   - `rtld` (build-id `e79ab9af2ab05174`)
@@ -126,7 +128,7 @@ The build runs the recompiler on your machine to translate the game's code, then
 
 Download `XC3Recomp-<version>.zip` from the repository's **Releases** page and extract it. Start
 `build\xenoblade3_launcher.exe` and go through its **Install & build** tab (described below): build tools, game files,
-build, shaders. The zip has the source and a prebuilt launcher only - no game files; your own 2.2.0 dump is still
+build, shaders. The zip has the source and a prebuilt launcher only - no game files; your own 2.2.0 or 2.2.1 dump is still
 needed.
 
 ### The easy way: `Build XC3.bat`
@@ -136,7 +138,7 @@ bash runs the build scripts.
 
 Run `Build XC3.bat` from the repository root:
 1. **Tools:** If tools are missing, it runs `tools\setup_windows.ps1` to install MSYS2 with SDL3, FFmpeg, Vulkan, shaderc, VMA, and Opus, installs Python 3.12 (via winget), and initializes `.venv` with the necessary packages.
-2. **Game files:** Select the folder containing your extracted `exefs` and `romfs` (version 2.2.0). It verifies file hashes and build-IDs, then links `targets/`.
+2. **Game files:** Select the folder containing your extracted `exefs` and `romfs` (version 2.2.0 or 2.2.1). It verifies file hashes and build-IDs, then links `targets/`.
 3. **Build:** Runs `scripts/build_all.sh` to recompile the ARM64 binaries to C, compile the native game objects, build the runtime executable (`build/xc3.exe`), and build the launcher (`build/xenoblade3_launcher.exe`).
 
 The launcher's **Install & build** tab does the same four steps with progress bars and logs: **Build tools**
@@ -231,7 +233,7 @@ For developers looking to inspect or contribute to the project:
 runtime/        Dedicated runtime: loader, kernel (SVCs, threads, sync), IPC services, HLE,
                 NVN -> Vulkan translation, Maxwell shader translator, audio/video, input, diagnostics
 tools/          Recompiler lifter (AArch64 -> C), dump extraction validator, launcher, test tooling
-games/xc3/      Active game profile: Xenoblade Chronicles 3 (v2.2.0 build-IDs, modules, patches, HLE symbols)
+games/xc3/      Active game profile: Xenoblade Chronicles 3 (v2.2.0 / v2.2.1 build-IDs, modules, patches, HLE symbols)
 scripts/        Automated build, test, and run scripts (Git Bash)
 tests/          Unit tests, native C test suites, input replay tests
 data/           variants_seed_xc3.bin: pipeline variants recorded in play (shader hashes + render state, no game content)

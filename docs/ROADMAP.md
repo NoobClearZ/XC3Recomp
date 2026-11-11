@@ -1,6 +1,6 @@
 # XC3Recomp roadmap
 
-The plan for the native Windows port of *Xenoblade Chronicles 3* (version 2.2.0, build ID `82D187FE9EF9BE92`).
+The plan for the native Windows port of *Xenoblade Chronicles 3* (version 2.2.0 or 2.2.1, build ID `82D187FE9EF9BE92`).
 Each phase lists what is done and what is open; update it when an item lands (commit hash) or a new one is found.
 Status as of 2026-11-10.
 
@@ -134,9 +134,12 @@ Open:
 - Extraction from the user's own game packages (today: already extracted `exefs` / `romfs` folders only).
 - DLC folder in the launcher's Install & build tab (status, folder picker, "Use the DLC"), linked by
   `setup_game_files.ps1` (`-Dlc`) as `targets\dlcs` and checked by `check_dump.py --dlcs` (`e12d217`).
-- Update 2.2.1 (June 2025, adjustments for Nintendo Switch 2): everything (patches, hooks, addresses, the
-  `lib_nx.bin` and button atlas block offsets) is tied to 2.2.0; another version means finding every address again.
-  New dumps are likely 2.2.1, which `check_dump.py` refuses today.
+- Update 2.2.1 (June 2025, adjustments for Nintendo Switch 2): supported, nothing to port. Its `main`, `sdk`,
+  `subsdk0` and `rtld` have the SHA-256 of our 2.2.0 dump (checked against xc3-recomp's
+  `tools/data/expected-xc3-2.2.1.json`), and the RomFS image size it lists (15,194,654,528) is the one our 250 files
+  (names and sizes) make; only `main.npdm` differs, read at boot for the system resource size. `GetDisplayVersion`
+  still answers 2.2.0 (the two cannot be told apart by code). `check_dump.py` skips `.DS_Store` / `._*` /
+  `Thumbs.db` / `desktop.ini` in the romfs: a dump copied through a Mac failed with one extra file.
 - Installation management.
 
 ## Phase 4: Public source and testing

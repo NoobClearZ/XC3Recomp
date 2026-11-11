@@ -72,6 +72,13 @@ class TestGoodDump(Base):
         r = cd.check_dump(weird, self.profile)
         self.assertTrue(r.ok, r.messages)
 
+    def test_ignores_files_the_os_adds(self):
+        # a dump copied through macOS Finder or browsed in Windows Explorer
+        for rel in ('.DS_Store', 'a/.DS_Store', 'a/._one.bin', 'b/Thumbs.db', 'desktop.ini'):
+            wb(os.path.join(self.romfs, rel), b'x' * 8196)
+        r = cd.check_dump(os.path.dirname(self.exefs), self.profile)
+        self.assertTrue(r.ok, r.messages)
+
 
 class TestRejections(Base):
     def test_rejects_encrypted_containers_without_reading(self):

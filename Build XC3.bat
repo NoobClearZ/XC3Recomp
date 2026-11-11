@@ -1,7 +1,7 @@
 @echo off
 rem XC3Recomp: set up the tools (tools\setup_windows.ps1), point the project at your own game files
 rem (tools\setup_game_files.ps1) and build everything (scripts\build_all.sh). Instructions on how to obtain the game
-rem files are NOT provided: you need the exefs and romfs folders of your own copy, version 2.2.0 (the base game with the 2.2.0 update applied).
+rem files are NOT provided: you need the exefs and romfs folders of your own copy, version 2.2.0 or 2.2.1 (the base game with that update applied; their code and romfs are the same).
 setlocal EnableExtensions
 cd /d "%~dp0"
 title Xenoblade Chronicles 3 - build
@@ -39,13 +39,13 @@ set "PATH=C:\msys64\ucrt64\bin;C:\msys64\usr\bin;%PATH%"
 rem ---- 2. your game files
 ".venv\Scripts\python.exe" -X utf8 tools\extract\check_dump.py targets >nul 2>nul
 if errorlevel 1 goto :pick
-echo  2. Game files: targets\ already holds version 2.2.0
+echo  2. Game files: targets\ already holds version 2.2.0 or 2.2.1
 choice /m "    Use them"
 if not errorlevel 2 goto :build
 :pick
 echo.
 echo  2. Choose the folder that has the game's exefs and romfs folders in it.
-echo     ^(Xenoblade Chronicles 3, version 2.2.0: the base game with the 2.2.0 update applied^)
+echo     ^(Xenoblade Chronicles 3, version 2.2.0 or 2.2.1: the base game with that update applied^)
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\setup_game_files.ps1
 if errorlevel 2 goto :fail
 if errorlevel 1 (

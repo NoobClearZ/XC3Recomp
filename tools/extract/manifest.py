@@ -5,11 +5,22 @@ Only aggregates and a hash are stored (Constitution art. I): no list of game fil
 import hashlib
 import os
 
+# Files an OS adds to a folder it browsed, never part of the game: macOS Finder (.DS_Store, AppleDouble "._" files)
+# and Windows Explorer (Thumbs.db, desktop.ini). A dump copied through a Mac otherwise failed the check with one
+# extra file at the root.
+OS_JUNK = frozenset({'.ds_store', 'thumbs.db', 'desktop.ini'})
+
+
+def is_os_junk(name):
+    return name.lower() in OS_JUNK or name.startswith('._')
+
 
 def build_manifest(romfs):
     dirs, lines = {}, []
     for root, _, files in os.walk(romfs):
         for f in files:
+            if is_os_junk(f):
+                continue
             p = os.path.join(root, f)
             rel = os.path.relpath(p, romfs).replace(os.sep, '/')
             size = os.path.getsize(p)

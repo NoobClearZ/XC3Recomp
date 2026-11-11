@@ -1,7 +1,7 @@
 # Point the project at the player's own game files (modelled on LASRecomp's start-screen game-file setup).
 # The player picks a folder; exefs (the folder with main and main.npdm) and romfs (the game's data root: XC3's has
 # bf3.arh / bf3.ard and no bdat/ folder; bdat/ is XCDE's) are found in it or a few levels below (some layouts nest them). Game packages (.xci / .nsp / .nca / .nsz)
-# are refused without being read. The version (games/<id>/profile.json: XC3 2.2.0) and the romfs contents are checked by tools/extract/check_dump.py,
+# are refused without being read. The version (games/<id>/profile.json: XC3 2.2.0 or 2.2.1, the same code and romfs) and the romfs contents are checked by tools/extract/check_dump.py,
 # then targets\exefs and targets\romfs are linked to the folders found (junctions: no 14 GB copy).
 # [XC3] The add-on content (DLC, optional): a folder with bf3_dlc01..04.arh / .ard (and movie\, sound\), linked as
 # targets\dlcs. Found next to exefs / romfs when the game's folder is chosen, or chosen on its own with -Dlc.
@@ -74,7 +74,7 @@ function Find-Game([string]$dir, [int]$depth, [hashtable]$found) {
 if (-not $Folder) {
     Add-Type -AssemblyName System.Windows.Forms
     $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dlg.Description = "$PickHint (Xenoblade Chronicles 3, version 2.2.0)"
+    $dlg.Description = "$PickHint (Xenoblade Chronicles 3, version 2.2.0 or 2.2.1)"
     if ($dlg.ShowDialog() -ne 'OK') { Write-Host 'Cancelled.'; exit 2 }
     $Folder = $dlg.SelectedPath
 }
@@ -98,7 +98,7 @@ Write-Host "romfs: $($found.romfs)"
 # version (build-ids) and romfs contents
 & $py -X utf8 "$root\tools\extract\check_dump.py" --exefs $found.exefs --romfs $found.romfs
 if ($LASTEXITCODE -ne 0) {
-    if ($LASTEXITCODE -eq 4) { Write-Host 'XC3Recomp needs version 2.2.0: the base game with the 2.2.0 update applied.' }
+    if ($LASTEXITCODE -eq 4) { Write-Host 'XC3Recomp needs version 2.2.0 or 2.2.1: the base game with that update applied.' }
     elseif ($LASTEXITCODE -eq 5) { Write-Host 'Some romfs files are missing or different, usually from a copy or extraction that stopped partway, or a romfs without the 2.2.0 update. Get the game files again, then choose the folder again.' }
     exit 1
 }

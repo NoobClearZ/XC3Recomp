@@ -390,8 +390,8 @@ static const char *const k_en[][2] = {
     // [XC3] tab "Instalación y build" (tab_build)
     {"Instalación y build", "Install & build"}, {"Archivos del juego", "Game files"}, {"Compilación", "Build"},
     {"Comprobando los archivos del juego...", "Checking the game files..."},
-    {"Listos: Xenoblade Chronicles 3, versión 2.2.0 (targets/)", "Ready: Xenoblade Chronicles 3, version 2.2.0 (targets/)"},
-    {"Hace falta la versión 2.2.0 (el juego base con la actualización 2.2.0)", "Version 2.2.0 is needed (the base game with the 2.2.0 update)"},
+    {"Listos: Xenoblade Chronicles 3, versión 2.2.0 o 2.2.1 (targets/)", "Ready: Xenoblade Chronicles 3, version 2.2.0 or 2.2.1 (targets/)"},
+    {"Hace falta la versión 2.2.0 o 2.2.1 (el juego base con esa actualización)", "Version 2.2.0 or 2.2.1 is needed (the base game with that update)"},
     {"Faltan archivos del romfs o son distintos (copia incompleta)", "Some romfs files are missing or different (an incomplete copy)"},
     {"Son paquetes (.xci / .nsp / .nca): hacen falta las carpetas exefs y romfs", "Those are packages (.xci / .nsp / .nca): the exefs and romfs folders are needed"},
     {"No hay archivos del juego en targets/", "No game files in targets/"},
@@ -1090,8 +1090,8 @@ static void tab_build() {
     section(T("Archivos del juego"));
     if (g_gf_code == -2) gf_check();
     if (g_gf_code == -1 || g_gf_proc) ImGui::TextDisabled("%s", T("Comprobando los archivos del juego..."));
-    else if (g_gf_code == 0) ImGui::TextColored(pal::accent, "%s", T("Listos: Xenoblade Chronicles 3, versión 2.2.0 (targets/)"));
-    else ImGui::TextColored(pal::warn, "%s", g_gf_code == 4 ? T("Hace falta la versión 2.2.0 (el juego base con la actualización 2.2.0)")
+    else if (g_gf_code == 0) ImGui::TextColored(pal::accent, "%s", T("Listos: Xenoblade Chronicles 3, versión 2.2.0 o 2.2.1 (targets/)"));
+    else ImGui::TextColored(pal::warn, "%s", g_gf_code == 4 ? T("Hace falta la versión 2.2.0 o 2.2.1 (el juego base con esa actualización)")
                                            : g_gf_code == 5 ? T("Faltan archivos del romfs o son distintos (copia incompleta)")
                                            : g_gf_code == 2 ? T("Son paquetes (.xci / .nsp / .nca): hacen falta las carpetas exefs y romfs")
                                                             : T("No hay archivos del juego en targets/"));
