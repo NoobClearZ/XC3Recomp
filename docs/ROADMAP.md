@@ -137,18 +137,22 @@ Done:
 - Release zip built by CI (`.github/workflows/release.yml`, on a pushed tag `v*`): the repository at that tag plus a
   prebuilt `build/xenoblade3_launcher.exe` (package_guard checked), so a new user extracts it and starts the launcher:
   no bat at all.
+- Update 2.2.1 (June 2025, adjustments for Nintendo Switch 2) accepted, nothing to port (`8baba85`). Its `main`, `sdk`,
+  `subsdk0` and `rtld` have the SHA-256 of our 2.2.0 dump (checked against xc3-recomp's
+  `tools/data/expected-xc3-2.2.1.json`), and the RomFS image size it lists (15,194,654,528) is the one our 250 files
+  (names and sizes) make; only `main.npdm` differs, read at boot for the system resource size. `check_dump.py` skips
+  `.DS_Store` / `._*` / `Thumbs.db` / `desktop.ini` in the romfs: a dump copied through a Mac failed with one extra file.
+  Checked with a real 2.2.1 dump (2026-11-11): the four modules, `bf3.arh` and `bf3.ard` have the SHA-256 of the 2.2.0
+  ones; `main.npdm` differs in bytes 0x80-0x27f only (the start of its ACID section), not in the header the runtime
+  reads (priority, stack, system resource size); a played session applied the `lib_nx.bin` and button atlas patches at
+  the 2.2.0 offsets. The boot log names the version (`main.npdm: sha256 ..., version ...`) and `GetDisplayVersion`
+  answers 2.2.1 for that `main.npdm`, 2.2.0 otherwise (the title screen's version text).
 
 Open:
 - Choosing an install folder other than the repository.
 - Extraction from the user's own game packages (today: already extracted `exefs` / `romfs` folders only).
 - DLC folder in the launcher's Install & build tab (status, folder picker, "Use the DLC"), linked by
   `setup_game_files.ps1` (`-Dlc`) as `targets\dlcs` and checked by `check_dump.py --dlcs` (`e12d217`).
-- Update 2.2.1 (June 2025, adjustments for Nintendo Switch 2): supported, nothing to port. Its `main`, `sdk`,
-  `subsdk0` and `rtld` have the SHA-256 of our 2.2.0 dump (checked against xc3-recomp's
-  `tools/data/expected-xc3-2.2.1.json`), and the RomFS image size it lists (15,194,654,528) is the one our 250 files
-  (names and sizes) make; only `main.npdm` differs, read at boot for the system resource size. `GetDisplayVersion`
-  still answers 2.2.0 (the two cannot be told apart by code). `check_dump.py` skips `.DS_Store` / `._*` /
-  `Thumbs.db` / `desktop.ini` in the romfs: a dump copied through a Mac failed with one extra file.
 - Installation management.
 
 ## Phase 4: Public source and testing

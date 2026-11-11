@@ -5,6 +5,7 @@
 
 #include "../hle.h"
 #include "../ipc.h"
+#include "../rt.h"
 #include "../settings.h"
 
 #define AM_NO_MESSAGE MAKE_RESULT(128, 3)
@@ -162,7 +163,7 @@ static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
         resp_size(resp, 8);
         break;
     }
-    case 23: memcpy(resp->data, "2.2.0", 6); resp_size(resp, 0x10); break;  // GetDisplayVersion ([XC3] the dump's version: games/xc3/profile.json)
+    case 23: memcpy(resp->data, g_display_version, strlen(g_display_version) + 1); resp_size(resp, 0x10); break;  // GetDisplayVersion ([XC3] the dump's version, 2.2.0 or 2.2.1: host/main_boot.c)
     case 40: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;  // NotifyRunning
     case 130: case 140: resp->copy_handles[resp->ncopy++] = new_event(); break;
     default: UNHANDLED("IApplicationFunctions");
