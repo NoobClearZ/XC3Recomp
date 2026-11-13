@@ -101,6 +101,11 @@ Done:
   variants now get theirs in the precompile (+~1 min): on a cold driver cache an 8-point tour had 148 draws waiting
   9.9 s for pipelines before, 2 waiting 0.07 s after; worst frame 3.3 s -> 1.1 s. Left: the loading holds on a cold
   cache (not examined). Measured with `XC3_FRAME_TIMES` + `tools/perf_compare.py` (frame times, 1% low).
+  Follow-up (`docs/plan_skip_guess_prebuild.md`): cold loading holds waited on guessed-key library prebuilds for
+  programs without a recorded variant (`gpl_prebuild`, 0 of 1,607 used). Turning those off by default
+  (`XC3_PREBUILD_GUESS=1`: on) cut cold tour loading holds 8,189 -> 566 ms (whole run 105.3 -> 3.2 s), frames >100 ms
+  30 -> 5, worst frame 863 -> 326 ms, 1% low 8.2 -> 26.5 fps at the 60 option (maps 20,22 cold at 30 fps: tour holds
+  88,163 -> 2,408 ms, worst frame 2,863 -> 970 ms).
 - Map-jump tour (`40a0d85`): `XCDE_TOUR` steps `jump <map> <point hash>` (the map menu's fast travel, request type 1)
   and `jumppos`, run in hidden batches by `tools/xc3_tour.py` (scratch save, per-point summary, captures). The jump
   list (`build/tours/xc3_jumps.txt`, from the game's own jump point table) is generated locally and never committed.

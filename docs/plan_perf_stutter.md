@@ -97,6 +97,35 @@ What it says for the phases:
     seed, geometry-shader (shadow) programs or the optimized whole pipelines. The frames over 100 ms that are left
     are those holds, not draws waiting.
 
+1.0b **Done: no guessed pipeline libraries for programs without a recorded variant** (exec.c `prewarm_drain`,
+     `guess_prebuild_on()`, `XC3_PREBUILD_GUESS=1`: on). Investigation (`docs/plan_precompile_driver_cache.md`,
+     `docs/plan_skip_guess_prebuild.md`) showed the cold loading holds waited on `gpl_prebuild` with guessed shader
+     keys (`glsl=1, depth_minus_one=true`): 0 of 1,607 guessed libraries were used by any draw, while ~980 s of worker
+     time went to never-drawn programs (mostly `no_fs` vertex shaders taking 17-37 s each). Same 8-point map 18 tour
+     at the 60 option as the phase 0 baseline (`XC3_INI` = a 60 fps xc3.ini, the `load60` replay, save
+     `base_20261109_233051`, `XC3_REALTIME=0`; a hidden run without `XC3_INI` ignores xc3.ini and runs at 30 fps),
+     cold AMD driver cache = a freshly named exe after its own precompile, `cache/variants.bin` reset to the same copy
+     before each run. Before = `q2_cold_min` (guessed libraries on, measurement session); after = `xc3_b60c.exe`, then
+     the same exe again warm:
+
+    | | p0 cold | before (guess on) | after (default) | after, warm | p0 warm (B) |
+    |---|---|---|---|---|---|
+    | average fps | 53.8 | 57.0 | 59.6 | 60.0 | 59.8 |
+    | 1% low fps | 4.4 | 8.2 | 26.5 | 40.7 | 31.5 |
+    | frames over 25 ms | 64 | 60 | 34 | 16 | 27 |
+    | frames over 100 ms | 42 | 30 | 5 | 1 | 2 |
+    | worst frame, ms | 3,344 | 863 | 326 | 121 | 463 |
+    | pipeline waits (ms) | 148 (9,931) | 3 (118) | 3 (112) | 0 | 1 (445) |
+    | program waits (ms) | 9 (116) | 6 (98) | 5 (87) | 4 (62) | 3 (45) |
+    | loading holds, tour (ms) | 39 (8,344) | 40 (8,189) | 19 (566) | 13 (161) | 39 (318) |
+    | loading holds, whole run (ms) | - | 121 (105,272) | 45 (3,216) | 43 (2,623) | - |
+    | `[hitch]` lines | 56 | 47 | 22 | 9 | 14 |
+
+    Other maps cold (`--maps 20,22 --every 40 --limit 8 --wait 1200 --start 4500`), both runs at 30 fps (no
+    `XC3_INI`), so only A against B: loading holds tour 88,163 -> 2,408 ms (whole run 193,014 -> 5,159 ms), frames
+    >100 ms 119 -> 30, worst frame 2,863 -> 970 ms, pipeline waits 8 (168 ms) -> 6 (137 ms). Not covered: battles
+    (no battle replay yet) and a visual check of scene starts (the tours ran without captures).
+
 1.1 **Skip or wait for a pipeline that is not ready** (exec.c T174). Today a draw always waits for its pipeline
     (dropping it made objects flash black, ~18,000 draws in 6 minutes), so every first-time build is a hitch.
     xc3-recomp skips the draw only when every target of its pass was rendered in the previous frame (the old image

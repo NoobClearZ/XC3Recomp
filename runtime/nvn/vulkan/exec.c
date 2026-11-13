@@ -3258,6 +3258,16 @@ static bool prebuild_libs_on(void) {  // XCDE_PREBUILD_LIBS=0/1 (default: on wit
     }
     return on;
 }
+// [XC3] Guessed-key library prebuild for programs with no recorded variant: measured 0 of 1,607 used by any draw,
+// ~980 s of worker time (mostly never-drawn no_fs vertex shaders), and loading holds waited on them. Default off.
+static bool guess_prebuild_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XC3_PREBUILD_GUESS");
+        on = e && atoi(e) != 0;
+    }
+    return on;
+}
 // pipelines whose program is ready go to the workers (render thread; also called while a draw waits)
 static void prewarm_pump(void) {
     {
@@ -3361,12 +3371,17 @@ static void prewarm_drain(void) {  // (render thread, start of each draw)
         }
         if (any) stat_prewarm_progs++;
         else if (prebuild_libs_on() && pl_npending < PL_MAX) {
-            // [XCDE] T211: no variant seen yet (a new area / a new player): the variant precompilation guesses
-            ShaderKey vk_ = {0}, fk_ = {0};
-            vk_.glsl = fk_.glsl = 1;
-            vk_.depth_minus_one = true;
-            Prog *pr = get_program(np, &vk_, &fk_);
-            if (pr) { pl_pending[pl_npending++] = pr; stat_prewarm_libs++; }
+            if (!guess_prebuild_on()) {
+                static int nl;
+                if (!nl++) LOG("[prewarm] XC3: no guessed libraries for programs without a recorded variant (XC3_PREBUILD_GUESS=1: on)\n");
+            } else {
+                // [XCDE] T211: no variant seen yet (a new area / a new player): the variant precompilation guesses
+                ShaderKey vk_ = {0}, fk_ = {0};
+                vk_.glsl = fk_.glsl = 1;
+                vk_.depth_minus_one = true;
+                Prog *pr = get_program(np, &vk_, &fk_);
+                if (pr) { pl_pending[pl_npending++] = pr; stat_prewarm_libs++; }
+            }
         }
     }
     g_draw_gs_in = saved_gs_in;
