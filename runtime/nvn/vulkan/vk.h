@@ -47,6 +47,7 @@ typedef struct {
     uint32_t sc_count;
     VkImage sc_images[8];
     VkImageView sc_views[8];
+    bool dmabuf_export;  // Linux: VK_KHR_external_memory_fd + VK_EXT_external_memory_dma_buf for pmem
 } VkG;
 extern VkG g_vk;
 

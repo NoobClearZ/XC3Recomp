@@ -3,16 +3,13 @@
 // was built on XCDE's addresses and was removed with the XCDE profile: the calls input.c still makes are no-ops here.
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "../rt.h"
 #include "../cpu.h"
 #include "../diag/diag.h"
 #include "../platform.h"
 #include "../settings.h"
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 // From the keys / pad (runtime/hle/input.c): XCDE's party switch and arts hotkeys - not in XC3 (requests dropped)
 void party_switch_request(int step) { (void)step; }
@@ -89,7 +86,7 @@ static void tour_shot(const char *name) {
     if (!dir[0]) {
         const char *d = getenv("XCDE_TOUR_SHOTS");
         snprintf(dir, sizeof dir, "%s", d ? d : "build/tour");
-        CreateDirectoryA(dir, NULL);
+        mkdir(dir, 0755);
     }
     snprintf(g_tour_shot, sizeof g_tour_shot, "%s/%s.png", dir, name);
 }

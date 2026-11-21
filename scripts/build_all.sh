@@ -5,22 +5,24 @@
 # Needs: MSYS2 UCRT64 at C:\msys64 with the libraries, and .venv with capstone unicorn lz4 ziglang (see README).
 set -e
 cd "$(dirname "$0")/.."
+. scripts/env.sh
 step() { echo; echo "=== $* ==="; }
-[ -x .venv/Scripts/python ] || [ -f .venv/Scripts/python.exe ] || { echo "missing .venv (run \"Build XC3.bat\" or see the README)"; exit 1; }
+[ -x .venv/bin/python ] || [ -x .venv/Scripts/python ] || [ -f .venv/Scripts/python.exe ] || { echo "missing .venv (run tools/setup_linux.sh on Linux or \"Build XC3.bat\" on Windows)"; exit 1; }
 step "1/5 Checking the game files (targets/)"
 export XC3_GAME=${XC3_GAME:-xc3}
 echo "game: games/$XC3_GAME"
-.venv/Scripts/python -X utf8 tools/extract/check_dump.py targets
+$XC3_PY -X utf8 tools/extract/check_dump.py targets
 step "2/5 Recompiling the game code into C (generated/, ~1 min)"
-(cd tools && ../.venv/Scripts/python -X utf8 gen_all.py --out ../generated)
+(cd tools && ../$XC3_PY -X utf8 gen_all.py --out ../generated)
 step "3/5 Compiling the game code (build/obj/, several minutes the first time)"
 XCDE_SKIP_BOOT_LINK=1 scripts/build_boot.sh
-step "4/5 Compiling the runtime and linking ${XC3_EXE:-${XCDE_EXE:-build/xc3.exe}}"
+exe=${XC3_EXE:-${XCDE_EXE:-build/xc3${XC3_EXE_EXT}}}
+step "4/5 Compiling the runtime and linking $exe"
 scripts/build_rt_gfx.sh
-exe=${XC3_EXE:-${XCDE_EXE:-build/xc3.exe}}
 [ -f "$exe" ] || { echo "the link failed (see build/link_gfx.err)"; exit 1; }
 scripts/copy_upscaler_dlls.sh  # (FSR DLLs from third_party/fidelityfx; DLSS only with sdk/)
-launcher=build/xenoblade3_launcher.exe; play="Play XC3.bat"  # [XC3] (tools/launcher/build.sh)
+launcher=build/xenoblade3_launcher${XC3_EXE_EXT}
+play="Play XC3.bat"; [ "$XC3_OS" = linux ] && play="scripts/play.sh"
 step "5/5 Building the launcher ($launcher)"
 tools/launcher/build.sh
 echo

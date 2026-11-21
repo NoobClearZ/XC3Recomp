@@ -21,6 +21,7 @@ bool vk_imgui_backend_init(void);
 void input_reset(void);
 void vk_request_swapchain_recreate(void);
 bool dlss_available(void);
+bool fsr_available(void);
 }
 
 static std::mutex q_lock;
@@ -214,7 +215,11 @@ static void ui(void) {
             for (int i = 0; i < 5; i++) if (upv[i] == g_settings.upscaler) ui_ = i;
             if (ImGui::Combo("Upscaling / anti-aliasing", &ui_, ups, 5)) g_settings.upscaler = upv[ui_];
             if (g_settings.upscaler == UPSCALE_DLSS && !dlss_available())
-                ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1), "DLSS loads when the game starts: FSR 3.1 is used until a restart.");
+                ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
+                                   fsr_available() ? "DLSS loads when the game starts: FSR 3.1 is used until a restart."
+                                                   : "DLSS / FSR 3.1 runtime library not found on this platform.");
+            else if ((g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_FSR4) && !fsr_available())
+                ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1), "FSR 3.1 / FSR 4 runtime library not found on this platform (use FSR 1.0 or Bilinear).");
             if (UPSCALE_TEMPORAL(g_settings.upscaler)) {  // [XC3] the scene's render size; no frame generation (launcher.cpp)
                 static const char *uq[] = {"Native (anti-aliasing only)", "Quality (67 %)", "Balanced (59 %)", "Performance (50 %)",
                                            "Ultra performance (33 %)"};
@@ -227,10 +232,12 @@ static void ui(void) {
             }
             ImGui::SeparatorText("Quality");
             bool smaa = g_settings.antialias == AA_SMAA;
-            ImGui::BeginDisabled(UPSCALE_TEMPORAL(g_settings.upscaler));  // [XC3] (exec.c post_process: not with them)
+            bool tmp_active = UPSCALE_TEMPORAL(g_settings.upscaler) &&
+                              (g_settings.upscaler == UPSCALE_DLSS ? (dlss_available() || fsr_available()) : fsr_available());
+            ImGui::BeginDisabled(tmp_active);  // [XC3] (exec.c post_process: not with them)
             if (ImGui::Checkbox("SMAA anti-aliasing", &smaa)) g_settings.antialias = smaa ? AA_SMAA : AA_OFF;
             ImGui::EndDisabled();
-            if (UPSCALE_TEMPORAL(g_settings.upscaler)) ImGui::SameLine(), ImGui::TextDisabled("(not used with FSR 3.1 / FSR 4 / DLSS)");
+            if (tmp_active) ImGui::SameLine(), ImGui::TextDisabled("(not used with FSR 3.1 / FSR 4 / DLSS)");
             bool dof = !g_settings.dof_off;
             if (ImGui::Checkbox("Depth of field", &dof)) g_settings.dof_off = !dof;
             // [XC3] two switches (romfs_virtual.c xc3_libnx_patch: lib_nx.bin read once, at start)
@@ -316,8 +323,22 @@ extern "C" void menu_render(void *cmd, uint32_t w, uint32_t h) {
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         font_h = fmaxf(16.0f, h / 1080.0f * 22.0f);
-        if (!io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", font_h, nullptr, io.Fonts->GetGlyphRangesDefault()))
-            io.Fonts->AddFontDefault();
+        static const char *const ui_fonts[] = {
+#ifdef _WIN32
+            "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf",
+#else
+            "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+#endif
+        };
+        bool font_loaded = false;
+        for (const char *fp : ui_fonts) {
+            if (FILE *tf = fopen(fp, "rb")) {
+                fclose(tf);
+                if (io.Fonts->AddFontFromFileTTF(fp, font_h, nullptr, io.Fonts->GetGlyphRangesDefault())) { font_loaded = true; break; }
+            }
+        }
+        if (!font_loaded) io.Fonts->AddFontDefault();
         ImGui::StyleColorsDark();
         ImGui::GetStyle().ScaleAllSizes(font_h / 16.0f);
         if (!vk_imgui_backend_init()) { ImGui::DestroyContext(ctx); ctx = nullptr; open_ = false; return; }

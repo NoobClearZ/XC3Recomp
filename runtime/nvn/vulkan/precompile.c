@@ -240,7 +240,7 @@ static void scan_file(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return;
     fseek(f, 0, SEEK_END);
-    long long n = _ftelli64(f);
+    long long n = plat_ftell64(f);
     fseek(f, 0, SEEK_SET);
     bool big = n > (64 << 20);
     if (big) pthread_mutex_lock(&big_lock);
@@ -341,7 +341,7 @@ static void scan_arc(const uint8_t *d, size_t n) {
 static pthread_mutex_t ard_big_lock = PTHREAD_MUTEX_INITIALIZER;  // (one block over 64 MB at a time, as scan_file)
 static void scan_block(FILE *f, uint64_t at, uint8_t *inner, size_t inner_cap) {
     uint8_t hd[0x30];
-    if (_fseeki64(f, (long long)at, SEEK_SET) || fread(hd, 1, 0x30, f) != 0x30) return;
+    if (plat_fseek64(f, at, SEEK_SET) || fread(hd, 1, 0x30, f) != 0x30) return;
     uint32_t type = rd32(hd + 4), ds = rd32(hd + 8), cs = rd32(hd + 12);
     bool big = ds > (64u << 20);
     if (big) pthread_mutex_lock(&ard_big_lock);
@@ -384,7 +384,7 @@ static bool ard_list(const char *path) {
     uint8_t *win = malloc(1 << 20);
     for (;;) {
         uint8_t hd[0x30];
-        if (_fseeki64(f, (long long)pos, SEEK_SET) || fread(hd, 1, 0x30, f) != 0x30) break;
+        if (plat_fseek64(f, pos, SEEK_SET) || fread(hd, 1, 0x30, f) != 0x30) break;
         uint32_t type = rd32(hd + 4), ds = rd32(hd + 8), cs = rd32(hd + 12);
         if (!memcmp(hd, "xbc1", 4) && (type == 1 || type == 3) && cs && cs <= ds && ds <= (512u << 20)) {
             if (nblocks == cap) ard_blocks = realloc(ard_blocks, (cap = cap ? cap * 2 : 65536) * sizeof *ard_blocks);
@@ -392,7 +392,7 @@ static bool ard_list(const char *path) {
             pos += (0x30 + (uint64_t)cs + 15) & ~15ull;
             continue;
         }
-        _fseeki64(f, (long long)pos + 16, SEEK_SET);  // (the next header in this window)
+        plat_fseek64(f, pos + 16, SEEK_SET);  // (the next header in this window)
         size_t n = fread(win, 1, 1 << 20, f), k = 0;
         if (!n) break;
         while (k + 4 <= n && memcmp(win + k, "xbc1", 4)) k += 16;
@@ -829,7 +829,7 @@ int vk_precompile_main(const char *root) {
         // old xcde.exe left beside xc3.exe the line never matched and the launcher precompiled at every Play
         struct stat es;
         char self[1024];
-        if (!plat_exe_path(self, sizeof self)) snprintf(self, sizeof self, "build/xcde.exe");
+        if (!plat_exe_path(self, sizeof self)) snprintf(self, sizeof self, "build/xc3" PLAT_EXE_SUFFIX);
         if (stat(self, &es) == 0) fprintf(f, "exe %lld %lld%c", (long long)es.st_size, (long long)es.st_mtime, 10);
         fclose(f);
     }

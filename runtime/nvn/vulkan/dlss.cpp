@@ -9,20 +9,21 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
-#include <windows.h>
 #include <vulkan/vulkan.h>
+
+extern "C" {
+#include "temporal.h"
+#include "../../settings.h"
+}
+
+#ifdef _WIN32
+#include <windows.h>
 
 #include <sl.h>
 #include <sl_consts.h>
 #include <sl_dlss.h>
 #include <sl_hooks.h>
 #include <sl_helpers_vk.h>
-
-extern "C" {
-#include "temporal.h"
-#include "../../settings.h"
-
-}
 #define DLOG(...) fprintf(stderr, __VA_ARGS__)
 
 static HMODULE sl_mod;
@@ -257,3 +258,23 @@ extern "C" bool dlss_evaluate(VkCommandBuffer cb, const TexBackend *color, const
     if (r != sl::Result::eOk) { static int n; if (n++ < 5) DLOG("[dlss] evaluate failed: %d\n", (int)r); return false; }
     return true;
 }
+#else
+extern "C" bool dlss_init_early(void) { return false; }
+extern "C" int dlss_instance_exts(const char **out, int max) { (void)out; (void)max; return 0; }
+extern "C" void dlss_device_requirements(const char **ext, uint32_t *n, uint32_t max, VkPhysicalDeviceVulkan12Features *f12,
+                                         VkPhysicalDeviceVulkan13Features *f13, uint32_t *extra_gfx, uint32_t *extra_compute) {
+    (void)ext; (void)n; (void)max; (void)f12; (void)f13;
+    *extra_gfx = *extra_compute = 0;
+}
+extern "C" void dlss_device_created(VkInstance inst, VkPhysicalDevice phys, VkDevice dev, uint32_t qfam) {
+    (void)inst; (void)phys; (void)dev; (void)qfam;
+}
+extern "C" PFN_vkVoidFunction dlss_proxy(VkDevice dev, const char *name) { (void)dev; (void)name; return nullptr; }
+extern "C" bool dlss_available(void) { return false; }
+extern "C" bool dlss_evaluate(VkCommandBuffer cb, const TexBackend *color, const TexBackend *mv, const TexBackend *depth,
+                              const TexBackend *out, const TexBackend *hud, const float jitter[2], bool reset, const TmpCamera *cam,
+                              const double reproj[16]) {
+    (void)cb; (void)color; (void)mv; (void)depth; (void)out; (void)hud; (void)jitter; (void)reset; (void)cam; (void)reproj;
+    return false;
+}
+#endif

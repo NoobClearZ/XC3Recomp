@@ -74,7 +74,7 @@ def main():
     ap.add_argument('--replay', default=os.path.join(REPO, 'play', '20261106_001937', 'input.txt'),
                     help='input replay that loads the save (title screen -> Continue)')
     ap.add_argument('--save', default=None, help='folder with the save files (a save_0 copy); default: the backup made when --replay was recorded')
-    ap.add_argument('--exe', default=os.path.join(REPO, 'build', 'xc3.exe'))
+    ap.add_argument('--exe', default=os.path.join(REPO, 'build', 'xc3.exe' if os.name == 'nt' else 'xc3'))
     ap.add_argument('--out', default=None, help='default: build/tour_runs/<date_time>')
     ap.add_argument('--shots', action='store_true', help='a capture after each jump (XCDE_TOUR_SHOT_AUTO)')
     ap.add_argument('--frame-times', action='store_true', help='every frame time into chunkNN/frames.txt (XC3_FRAME_TIMES; tools/perf_compare.py)')
@@ -118,7 +118,8 @@ def main():
         for kv in a.env:
             k, _, v = kv.partition('=')
             env[k] = v
-        env['PATH'] = 'C:\\msys64\\ucrt64\\bin;' + env.get('PATH', '')
+        if os.name == 'nt':
+            env['PATH'] = 'C:\\msys64\\ucrt64\\bin;' + env.get('PATH', '')
         # (wall clock: the replay ~70 s, then each jump's frames at >= ~20 fps plus a cold load)
         limit = a.timeout or 180 + len(steps) * (a.wait / 20 + 20)
         log_path = os.path.join(work, 'game.log')

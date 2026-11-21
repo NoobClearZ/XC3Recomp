@@ -11,6 +11,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 #include "../../kernel.h"
 #include "shaders.h"
@@ -1286,6 +1290,13 @@ static void st_defaults(void) {
     for (int i = 0; i < 8; i++) { st.blend[i][1] = 2; st.blend[i][2] = 1; st.blend[i][3] = 2; st.blend[i][4] = 1; st.blend[i][5] = 1; st.blend[i][6] = 1; }
 }
 
+#ifdef __linux__
+static void *pmem_dmabuf_alloc(uint64_t size, int *fd_lo, int *fd_hi, uint64_t *lo_bytes);
+#endif
+
+static void pmem_sync_drain(void);
+static uint64_t pmem_sync_submitted(void);
+
 void vk_exec_init(void) {
     prof = getenv("LARECOMP_VK_PROF") != NULL;
     if (prof) {
@@ -1293,6 +1304,10 @@ void vk_exec_init(void) {
         VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = SUBS * 2};
         if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &prof_qp) != VK_SUCCESS) prof_qp = VK_NULL_HANDLE;
     }
+#ifdef __linux__
+    if (g_vk.dmabuf_export && g_vk.host_import) plat_pmem_set_dmabuf_alloc(pmem_dmabuf_alloc);
+#endif
+    kernel_pmem_set_sync_hooks(pmem_sync_drain, pmem_sync_submitted, vk_completed_seq, renderer_wait_seq);
     st_defaults();
 }
 
@@ -4236,6 +4251,102 @@ static VkBuffer pmem_buf, pmemh_buf, ptab_buf, pzero_buf;
 static VkDeviceMemory pmem_mem, pmemh_mem, ptab_mem;
 static VmaAllocation pzero_mem;
 static uint64_t pmem_bytes, pmemh_bytes;
+static bool pmem_dmabuf_backed;
+
+#ifdef __linux__
+// [XC3] On Linux, RADV's userptr (VK_EXT_external_memory_host) rejects file-backed MAP_SHARED (memfd) VMAs.
+// Instead, allocate the two pool buffers directly as host-coherent DMA-BUF-exportable Vulkan memory and hand
+// their fds to platform/linux.c, which mmaps 64 KB alias slices (and the contiguous view) from those fds.
+static bool pmem_alloc_dmabuf_part(uint64_t sz, VkBuffer *out_buf, VkDeviceMemory *out_mem, int *out_fd) {
+    PFN_vkGetMemoryFdKHR get_fd = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryFdKHR");
+    if (!get_fd) return false;
+    VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+                                           .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = sz,
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
+    VkBuffer buf = VK_NULL_HANDLE;
+    if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) return false;
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(g_vk.dev, buf, &req);
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+    // Prefer host-cached coherent system RAM (avoids VRAM and keeps CPU accesses fast), then uncached coherent RAM.
+    const VkMemoryPropertyFlags want[3] = {
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    };
+    int mt = -1;
+    for (int pass = 0; pass < 3 && mt < 0; pass++) {
+        for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+            if (!(req.memoryTypeBits & (1u << i))) continue;
+            VkMemoryPropertyFlags f = mp.memoryTypes[i].propertyFlags;
+            if ((f & want[pass]) != want[pass]) continue;
+            if (pass < 2 && (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) continue;
+            mt = (int)i;
+            break;
+        }
+    }
+    if (mt < 0) { vkDestroyBuffer(g_vk.dev, buf, NULL); return false; }
+    VkExportMemoryAllocateInfo exp = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+                                      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &exp,
+                               .allocationSize = req.size, .memoryTypeIndex = (uint32_t)mt};
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    if (vkAllocateMemory(g_vk.dev, &ai, NULL, &mem) != VK_SUCCESS) { vkDestroyBuffer(g_vk.dev, buf, NULL); return false; }
+    if (vkBindBufferMemory(g_vk.dev, buf, mem, 0) != VK_SUCCESS) {
+        vkDestroyBuffer(g_vk.dev, buf, NULL); vkFreeMemory(g_vk.dev, mem, NULL); return false;
+    }
+    VkMemoryGetFdInfoKHR fi = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = mem,
+                               .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+    int fd = -1;
+    if (get_fd(g_vk.dev, &fi, &fd) != VK_SUCCESS || fd < 0) {
+        vkDestroyBuffer(g_vk.dev, buf, NULL); vkFreeMemory(g_vk.dev, mem, NULL); return false;
+    }
+    // Verify the driver's DMA-BUF supports non-zero page-aligned mmap offsets (needed for 64 KB alias slices).
+    off_t probe_off = sz >= 2 * PLAT_PMEM_PAGE ? (off_t)PLAT_PMEM_PAGE : 0;
+    void *probe = mmap(NULL, PLAT_PMEM_PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, probe_off);
+    if (probe == MAP_FAILED) {
+        close(fd); vkDestroyBuffer(g_vk.dev, buf, NULL); vkFreeMemory(g_vk.dev, mem, NULL); return false;
+    }
+    munmap(probe, PLAT_PMEM_PAGE);
+    *out_buf = buf;
+    *out_mem = mem;
+    *out_fd = fd;
+    return true;
+}
+
+static void *pmem_dmabuf_alloc(uint64_t size, int *fd_lo, int *fd_hi, uint64_t *lo_bytes) {
+    if (!g_vk.dev || !g_vk.dmabuf_export || !g_vk.host_import || !size) return NULL;
+    uint64_t lo = size < PMEM_LO_BYTES ? size : PMEM_LO_BYTES, hi = size - lo;
+    VkBuffer blo = VK_NULL_HANDLE, bhi = VK_NULL_HANDLE;
+    VkDeviceMemory mlo = VK_NULL_HANDLE, mhi = VK_NULL_HANDLE;
+    int flo = -1, fhi = -1;
+    if (!pmem_alloc_dmabuf_part(lo, &blo, &mlo, &flo)) return NULL;
+    if (hi && !pmem_alloc_dmabuf_part(hi, &bhi, &mhi, &fhi)) {
+        close(flo); vkDestroyBuffer(g_vk.dev, blo, NULL); vkFreeMemory(g_vk.dev, mlo, NULL);
+        return NULL;
+    }
+    void *view = mmap(NULL, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    bool ok = view != MAP_FAILED &&
+              mmap(view, lo, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, flo, 0) == view &&
+              (!hi || mmap((uint8_t *)view + lo, hi, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fhi, 0) == (uint8_t *)view + lo);
+    if (!ok) {
+        if (view != MAP_FAILED) munmap(view, size);
+        close(flo); vkDestroyBuffer(g_vk.dev, blo, NULL); vkFreeMemory(g_vk.dev, mlo, NULL);
+        if (fhi >= 0) close(fhi);
+        if (bhi) { vkDestroyBuffer(g_vk.dev, bhi, NULL); vkFreeMemory(g_vk.dev, mhi, NULL); }
+        return NULL;
+    }
+    pmem_buf = blo; pmem_mem = mlo; pmem_bytes = lo;
+    pmemh_buf = bhi; pmemh_mem = mhi; pmemh_bytes = hi;
+    pmem_dmabuf_backed = true;
+    *fd_lo = flo; *fd_hi = fhi; *lo_bytes = lo;
+    return view;
+}
+#endif
 
 static void pmem_import(void) {
     static int done;
@@ -4246,6 +4357,16 @@ static void pmem_import(void) {
     if (!view) return;
     done = 1;
     uint64_t lo = size < PMEM_LO_BYTES ? size : PMEM_LO_BYTES, hi = size - lo;
+    if (pmem_dmabuf_backed) {
+        if (host_import(ptab, PTAB_BYTES, &ptab_buf, &ptab_mem)) {
+            LOG("[vk] physical memory pool (DMA-BUF) ready for shader global memory: %llu MB (%llu + %llu MB)\n",
+                (unsigned long long)(size >> 20), (unsigned long long)(lo >> 20), (unsigned long long)(hi >> 20));
+            return;
+        }
+        LOG("[vk] physical memory pool page-table import failed (%llu MB): shader global memory there reads zero\n",
+            (unsigned long long)(size >> 20));
+        return;
+    }
     if (host_import(view, lo, &pmem_buf, &pmem_mem) && (!hi || host_import((uint8_t *)view + lo, hi, &pmemh_buf, &pmemh_mem)) &&
         host_import(ptab, PTAB_BYTES, &ptab_buf, &ptab_mem)) {
         pmem_bytes = lo, pmemh_bytes = hi;
@@ -5977,7 +6098,8 @@ static void draw_(CmdRec *r, bool indexed) {
     // ---- rasterizer
     uint8_t cull = st.poly[0];
     if (vkey.flip_x) cull = 0;  // (mirror mode's composite: one full-screen quad, either winding)
-    VkCullModeFlags cm = cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+    VkCullModeFlags cm = cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT :
+                         cull == 3 ? VK_CULL_MODE_FRONT_AND_BACK : VK_CULL_MODE_NONE;
     if (ss_need(SS_CULL, ss.cull == cm)) { ss.cull = cm; vkCmdSetCullMode(cb, cm); }
     bool ccw = st.poly[1] == 1;
     static int flipw = -1;  // LARECOMP_VK_FLIP_WINDING: invert the front-face mapping (A/B against Metal)
@@ -7562,6 +7684,7 @@ typedef struct { int kind; uint64_t a; } RJob;
 enum { RJ_EXEC, RJ_PRESENT, RJ_FENCE, RJ_DESTROY };
 #define RQ_N 4096
 static RJob rq[RQ_N];
+static uint64_t rq_present_ticket[RQ_N], rq_present_seq[RQ_N];  // [XC3] submitted GPU seq of each RJ_PRESENT ticket
 static uint64_t rq_head, rq_tail, rq_done;  // jobs run / queued; ticket of a job = its index + 1
 static int rq_presents;
 static pthread_mutex_t rq_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -7629,9 +7752,10 @@ static void *rq_worker(void *arg) {
         pthread_mutex_unlock(&rq_lock);
         static const char *const kind_name[] = {"recording a command list", "presenting", "setting a fence", "freeing a texture"};
         vk_rq_at(j.kind >= 0 && j.kind < 4 ? kind_name[j.kind] : "a job");
+        uint64_t pseq = 0;
         switch (j.kind) {
         case RJ_EXEC: backend_execute(j.a); break;
-        case RJ_PRESENT: backend_present((NvnTexture *)(uintptr_t)j.a); break;
+        case RJ_PRESENT: backend_present((NvnTexture *)(uintptr_t)j.a); pseq = submit_seq; break;
         case RJ_FENCE: { extern void nvn_sync_set_seq(uint64_t guest, uint64_t seq); nvn_sync_set_seq(j.a, renderer_fence_seq()); break; }
         case RJ_DESTROY: {
             NvnTexture *t = (NvnTexture *)(uintptr_t)j.a;
@@ -7644,8 +7768,12 @@ static void *rq_worker(void *arg) {
         }
         vk_rq_at("idle (queue empty)");
         pthread_mutex_lock(&rq_lock);
+        if (j.kind == RJ_PRESENT) {
+            rq_present_ticket[rq_head % RQ_N] = rq_head + 1;
+            rq_present_seq[rq_head % RQ_N] = pseq;
+            rq_presents--;
+        }
         rq_head++;
-        if (j.kind == RJ_PRESENT) rq_presents--;
         rq_done = rq_head;
         pthread_cond_broadcast(&rq_done_cv);
         pthread_mutex_unlock(&rq_lock);
@@ -7698,11 +7826,34 @@ void backend_wait_ticket(uint64_t ticket) {  // (guest threads) the worker has r
     while (rq_done < ticket) pthread_cond_wait(&rq_done_cv, &rq_lock);
     pthread_mutex_unlock(&rq_lock);
 }
+uint64_t backend_wait_present_seq(uint64_t ticket) {  // [XC3] wait for a present ticket and return its submitted GPU seq
+    if (!ticket) return 0;
+    pthread_mutex_lock(&rq_lock);
+    while (rq_done < ticket) pthread_cond_wait(&rq_done_cv, &rq_lock);
+    uint64_t idx = (ticket - 1) % RQ_N;
+    uint64_t seq = rq_present_ticket[idx] == ticket ? rq_present_seq[idx] : 0;
+    pthread_mutex_unlock(&rq_lock);
+    if (!seq) {
+        pthread_mutex_lock(&seq_lock);
+        seq = submit_seq;
+        pthread_mutex_unlock(&seq_lock);
+    }
+    return seq;
+}
 void backend_drain(void) {
     pthread_mutex_lock(&rq_lock);
     uint64_t t = rq_tail;
     pthread_mutex_unlock(&rq_lock);
     backend_wait_ticket(t);
+}
+static void pmem_sync_drain(void) {
+    if (backend_async()) backend_drain();
+}
+static uint64_t pmem_sync_submitted(void) {
+    pthread_mutex_lock(&seq_lock);
+    uint64_t s = submit_seq;
+    pthread_mutex_unlock(&seq_lock);
+    return s;
 }
 
 // the fences a list sets (CMD_FENCE_SYNC with a sync object), through its jumps and calls

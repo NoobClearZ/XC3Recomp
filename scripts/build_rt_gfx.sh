@@ -5,20 +5,20 @@
 #   scripts/build_rt_gfx.sh kernel hle/movie nvn/vulkan/exec   # only these (paths under runtime/, no .c)
 # The game objects (build/obj) come from scripts/build_boot.sh. The window build of main_boot gets -DXCDE_GFX.
 cd "$(dirname "$0")/.."
-Z=".venv/Scripts/python -m ziglang cc"
-# [XC3] MSYS2's headers (SDL3, Vulkan, VMA, FFmpeg, Opus) searched after zig's own libc, which is the CRT zig links.
-# With -I, mingw-w64 headers 14.0.0.r536 won over it: C++ broke (libc++'s <cstdio> include_next'ed MSYS2's stdio.h over
-# zig's wchar.h, "redefinition of _swscanf_l") and C linked against symbols zig's CRT lacks (_setjmp dllimport, fstat64i32).
-MSYS_CXX="-idirafter /c/msys64/ucrt64/include"
-CF="-O1 -march=x86_64_v2 -fno-strict-aliasing -fvisibility=hidden -Iruntime -Iruntime/nvn -Ithird_party $MSYS_CXX -w"
+. scripts/env.sh
+Z="$XC3_CC"
+ZXX="$XC3_CXX"
+# [XC3] On Windows, MSYS2 headers are searched after zig's own libc (-idirafter). On Linux, pkg-config supplies system cflags.
+SYS_CXX="$XC3_SYS_CFLAGS"
+CF="-O1 $XC3_ARCH -fno-strict-aliasing -fvisibility=hidden -Iruntime -Iruntime/nvn -Ithird_party $SYS_CXX -w"
 # [XC3] 64-bit off_t / stat (as runtime/platform/win_compat.h asks): with mingw's 32-bit ones stat() fails on files over
 # 2 GB and the virtual romfs left out XC3's 9.7 GB bf3.ard.
 CF="$CF -D_FILE_OFFSET_BITS=64"
 # [XC3] the language served to the game when the player picked none: the profile's default_language (XC3: en-GB)
-lang=$(.venv/Scripts/python -c "import json,sys; print(json.load(open(sys.argv[1])).get('default_language', ''))" \
+lang=$($XC3_PY -c "import json,sys; print(json.load(open(sys.argv[1])).get('default_language', ''))" \
        "games/${XC3_GAME:-xc3}/profile.json" 2>/dev/null | tr -d '\r')
 if [[ "$lang" =~ ^[A-Za-z-]+$ ]]; then CF="$CF -DGAME_DEFAULT_LANGUAGE=\"$lang\""; fi
-RT="loader dispatch kernel ipc fnprof platform/windows services/fs services/romfs_virtual services/am services/acc services/time
+RT="loader dispatch kernel ipc fnprof platform/${XC3_PLAT} services/fs services/romfs_virtual services/am services/acc services/time
     services/hid_set services/kbicons services/misc services/audio services/hwopus hle/heaps hle/pl hle/vi hle/nvn_boot hle/fibers hle/input hle/party
     hle/bindings hle/movie hle/framepace host/stubs host/settings_ini host/stubs_gfx host/gamelib_static host/main_boot diag/diag diag/sampler diag/watchdog
     diag/crashdump"
@@ -38,7 +38,7 @@ for f in $NVN; do
   extra=""
   if [ "$f" = smaa_data ]; then  # [XCDE] the SMAA reference shader (third_party/smaa, MIT) as a C string
     mkdir -p build/inc
-    .venv/Scripts/python tools/gen_smaa_inc.py third_party/smaa/SMAA.hlsl build/inc/smaa_hlsl.inc || fail=1
+    $XC3_PY tools/gen_smaa_inc.py third_party/smaa/SMAA.hlsl build/inc/smaa_hlsl.inc || fail=1
     extra="-Ibuild/inc -Ithird_party/smaa/Textures"
   fi
   o=build/nvn/nvn_$(echo $f | tr / _).o
@@ -51,24 +51,23 @@ if pick ui/menu; then
   rm -f build/nvn/host_menu_stub.o
   for f in $I/imgui.cpp $I/imgui_draw.cpp $I/imgui_tables.cpp $I/imgui_widgets.cpp $I/backends/imgui_impl_vulkan.cpp \
            runtime/nvn/vulkan/imgui_glue.cpp runtime/ui/menu_vk.cpp; do
-    .venv/Scripts/python -m ziglang c++ -c $f -o build/nvn/ui_$(basename ${f%.cpp}).o -std=c++17 -O1 -march=x86_64_v2 \
-      -fvisibility=hidden -Iruntime -Iruntime/nvn -Iruntime/nvn/vulkan -I$I -I$I/backends $MSYS_CXX -w \
+    $ZXX -c $f -o build/nvn/ui_$(basename ${f%.cpp}).o -std=c++17 -O1 $XC3_ARCH \
+      -fvisibility=hidden -Iruntime -Iruntime/nvn -Iruntime/nvn/vulkan -I$I -I$I/backends $SYS_CXX -w \
       || { echo "FAIL $f"; fail=1; }
   done
 fi
 # [XCDE] NVIDIA DLSS through Streamline (C++ headers, third_party/streamline, MIT)
 if pick nvn/vulkan/dlss; then
-  .venv/Scripts/python -m ziglang c++ -c runtime/nvn/vulkan/dlss.cpp -o build/nvn/nvn_vulkan_dlss.o -std=c++17     -O1 -march=x86_64_v2 -fvisibility=hidden -Iruntime -Iruntime/nvn -Ithird_party/streamline/include $MSYS_CXX -w    || { echo "FAIL nvn/vulkan/dlss"; fail=1; }
+  $ZXX -c runtime/nvn/vulkan/dlss.cpp -o build/nvn/nvn_vulkan_dlss.o -std=c++17 -O1 $XC3_ARCH -fvisibility=hidden -Iruntime -Iruntime/nvn -Ithird_party/streamline/include $SYS_CXX -w || { echo "FAIL nvn/vulkan/dlss"; fail=1; }
 fi
-# [XCDE] Vulkan Memory Allocator (header-only, MSYS2 vulkan-memory-allocator) and the path helpers: built here with the
-# same baseline CPU as everything else. (Built by hand before: vma.o carried AVX-512 from the build PC's CPU, so the
-# game would stop with an illegal instruction on CPUs without it.)
+# [XCDE] Vulkan Memory Allocator (header-only) and the path helpers: built here with the
+# same baseline CPU as everything else.
 if pick nvn/vulkan/vma; then
-  .venv/Scripts/python -m ziglang c++ -c runtime/nvn/vulkan/vma.cpp -o build/nvn/vma.o -std=c++17 -O1 -march=x86_64_v2 -fvisibility=hidden $MSYS_CXX -w || { echo "FAIL nvn/vulkan/vma"; fail=1; }
+  $ZXX -c runtime/nvn/vulkan/vma.cpp -o build/nvn/vma.o -std=c++17 -O1 $XC3_ARCH -fvisibility=hidden $SYS_CXX -w || { echo "FAIL nvn/vulkan/vma"; fail=1; }
 fi
 if pick paths; then
   $Z -c runtime/paths.c -o build/nvn/paths.o $CF -DGAMELIB_ID='"dev"' || { echo "FAIL paths"; fail=1; }
 fi
 [ $fail = 0 ] || exit 1
-[ -n "$XCDE_EXE" ] || taskkill //F //IM xcde.exe >/dev/null 2>&1
+[ "$XC3_OS" = windows ] && [ -z "$XCDE_EXE" ] && taskkill //F //IM xcde.exe >/dev/null 2>&1 || true
 scripts/link_gfx.sh && scripts/copy_upscaler_dlls.sh

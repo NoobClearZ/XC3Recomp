@@ -5,12 +5,14 @@
 # D-pad left/up/right/down = 0x1000/0x2000/0x4000/0x8000). Captures: build/<name>_<frame>.png (game assets: never commit them).
 # The run stops after the last capture. Log: build/<name>.log.
 cd "$(dirname "$0")/.."
-export PATH="/c/msys64/ucrt64/bin:$PATH"
+. scripts/env.sh
 ROUTE=$1; SHOTS=$2; SECS=${3:-90}; NAME=${4:-drive}
-taskkill //F //IM xc3.exe >/dev/null 2>&1
-taskkill //F //IM xcde.exe >/dev/null 2>&1
-EXE="build/xc3.exe"
-[ -f "$EXE" ] || EXE="build/xcde.exe"
+if [ "$XC3_OS" = windows ]; then
+  taskkill //F //IM xc3.exe >/dev/null 2>&1
+  taskkill //F //IM xcde.exe >/dev/null 2>&1
+fi
+EXE="build/xc3${XC3_EXE_EXT}"
+[ -f "$EXE" ] || EXE="build/xcde${XC3_EXE_EXT}"
 XS=""
 for f in ${SHOTS//,/ }; do XS="$XS,$f:build/${NAME}_$f.png"; done
 LAST=${SHOTS##*,}

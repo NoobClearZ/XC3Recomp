@@ -27,7 +27,7 @@ the `XCDE_*` environment switches and `[XCDE]` comment markers keep their names 
 The project is currently in active development (**Phases 1 & 2** of the [Roadmap](docs/ROADMAP.md)):
 - **Playable areas:** The opening sequence, title screen, early cutscenes, and Colony 9 are running with full audio, video playback, and controls on Windows (tested on NVIDIA RTX and AMD GPUs). An automated map-jump tour (`tools/xc3_tour.py`) visits the game's fast-travel points: the first five field maps have been reached without a crash so far, the rest is being toured.
 - **Performance & graphics features:** In-place alias memory pool reads, multi-threaded Zstd-compressed SPIR-V shader cache reads, automatic ASTC GPU compute shader decoding, transform feedback draw support (`nvnCommandBufferDrawTransformFeedback`), GPU queue sync (`CMD_WAIT_SYNC`), shadow-pass async builds, forced 16x anisotropic filtering, and 60 FPS and above (real-time frame step) with a frame-lag reduction option.
-- **Under active work:** Visual fixes (e.g. Colony 9 waterfall draw artifact) and testing gameplay stability across later regions and extended battles. See [Known issues](#known-issues) and [`docs/ROADMAP.md`](docs/ROADMAP.md).
+- **Under active work:** Testing gameplay stability and visual accuracy across later regions and extended battles. See [Known issues](#known-issues) and [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Features
 
@@ -69,7 +69,7 @@ The project is currently in active development (**Phases 1 & 2** of the [Roadmap
 
 ## Requirements
 
-- **OS:** Windows 10 / 11, x86-64 (x86-64-v2: SSE4.2 minimum).
+- **OS:** Windows 10 / 11 or Linux, x86-64 (x86-64-v2: SSE4.2 minimum).
 - **GPU:** Vulkan 1.3 compatible GPU.
   - **Tested:** NVIDIA GeForce RTX series and modern AMD Radeon GPUs.
   - **Intel / iGPUs:** Basic support logic present, but community testing and reports are welcome.
@@ -183,6 +183,28 @@ When finished, launch the game with `Play XC3.bat`. Precompile the shaders once 
 5. **Upscaler DLLs:** FSR 3.1 / FSR 4 use AMD's signed FidelityFX SDK 2.4.0 DLLs, included in `third_party/fidelityfx/` (MIT) and copied next to the exe by `scripts/copy_upscaler_dlls.sh` (`build_all.sh` runs it). DLSS needs NVIDIA Streamline 2.14.16, not redistributed here: put it in `sdk/` and run the same script.
 6. **Launch:** Run `Play XC3.bat` or start `build/xenoblade3_launcher.exe`.
 
+### On Linux
+
+1. **Install build dependencies and initialize `.venv`:**
+   ```bash
+   tools/setup_linux.sh
+   ```
+   (Installs/checks SDL3, Vulkan headers/loader, shaderc, Vulkan Memory Allocator, FFmpeg, Opus, zstd, zlib, clang, `pkg-config`, and creates `.venv` with `capstone`, `unicorn`, `lz4`, `ziglang`.)
+2. **Link and verify your game files:**
+   ```bash
+   tools/setup_game_files.sh /path/to/your/xc3_dump
+   ```
+3. **Build everything:**
+   ```bash
+   scripts/build_all.sh
+   ```
+   This produces `build/xc3` and `build/xenoblade3_launcher`.
+4. **Launch:** Run `build/xenoblade3_launcher` or `scripts/play.sh`.
+
+**Linux GPU notes:**
+- **AMD (Mesa RADV):** Tested on modern Radeon GPUs, including FSR 3.1 and FSR 4 (RDNA 4) via `ffx-vk-linux` (built automatically by `tools/setup_linux.sh`).
+- **NVIDIA:** The Vulkan 1.3 renderer, SMAA, and FSR 3.1 (via `ffx-vk-linux`) are cross-vendor, but **DLSS is currently Windows-only** (`runtime/nvn/vulkan/dlss.cpp`). The Linux physical memory pool path (DMA-BUF `mmap` with automatic fallback to `memfd` + `VK_EXT_external_memory_host`) has **not yet been tested on proprietary NVIDIA Linux drivers** — reports and testing on NVIDIA Linux are welcome (check the log for `[vk] physical memory pool` if foliage or GPU particles render incorrectly).
+
 ## Settings
 
 Settings are managed via the launcher or directly in `xc3.ini` in the repository root:
@@ -211,11 +233,9 @@ In game, **F1** opens the settings overlay.
 
 - **Early development status:** Active testing is currently focused on the opening and Colony 9 areas. Extended gameplay in later chapters, long battle encounters, and deep story progression are undergoing validation. The map-jump tour checks that areas load and render; it does not play them.
 - **First visit to an area:** Shader and pipeline builds can still cause hitches of up to a few seconds the first time an area is entered on a fresh cache (measured by the tour); with the shaders cached, later visits hitch much less.
-- **Graphical quirks:**
-  - Red / black box artifact near the Colony 9 waterfall (one draw call undergoing investigation).
 - **DLC shaders:** the shader precompilation reads only the base game's archive, so the DLC's shaders build the first time they are seen.
 - **Memory scaling in long sessions:** Pipeline libraries and driver memory grow over multi-hour play sessions; restarting periodically resolves any accumulated stutter.
-- **Platform support:** Currently focused on Windows x86-64 with Vulkan 1.3.
+- **Platform support:** Windows x86-64 and Linux x86-64 with Vulkan 1.3. On Linux, development and testing are currently done on AMD (Mesa RADV); DLSS is Windows-only and NVIDIA Linux drivers have not yet been directly tested (see [On Linux](#on-linux)).
 
 ## Where the knowledge is
 

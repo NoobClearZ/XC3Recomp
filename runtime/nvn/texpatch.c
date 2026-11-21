@@ -512,6 +512,8 @@ static void load_font(void) {  // a bold system font for the letters (none of th
         "/Library/Fonts/Arial Bold.ttf", "C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/segoeuib.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", "/usr/share/fonts/TTF/OpenSans-Bold.ttf",
+        "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
     };
     for (unsigned i = 0; i < sizeof paths / sizeof *paths && !g_font_ok; i++) {
         FILE *f = fopen(paths[i], "rb");
@@ -722,6 +724,51 @@ static void relabel(uint8_t *img, int W, int x0, int y0, int w, int h, int ach, 
             }
         }
         for (int k = 0; k < 4; k++) body[k] /= nb;
+        // [XC3] Exclude outer glow halos (semi-transparent coloured fringes that still have alpha > 127, e.g. mnu417
+        // glowing ZL/ZR): flood-fill from the border through non-body pixels; everything enclosed inside the body face
+        // (body + label) stays !fout, cleanly separating the face & label from any outer glow or outline.
+        {
+            uint8_t *fout = calloc((size_t)n, 1);
+            int fsp = 0;
+            for (int i = 0; i < n; i++) {
+                int x = i % w, y = i / w;
+                const uint8_t *p = px + i * 4;
+                float d = fabsf(p[0] - body[0]) + fabsf(p[1] - body[1]) + fabsf(p[2] - body[2]) + fabsf(p[3] - body[3]);
+                if ((x == 0 || y == 0 || x == w - 1 || y == h - 1) && d >= 64) { fout[i] = 1; stack[fsp++] = i; }
+            }
+            while (fsp) {
+                int i = stack[--fsp], x = i % w, y = i / w;
+                const int nb4[4] = {x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1};
+                for (int k = 0; k < 4; k++) {
+                    int j = nb4[k];
+                    if (j < 0 || fout[j]) continue;
+                    const uint8_t *p = px + j * 4;
+                    float d = fabsf(p[0] - body[0]) + fabsf(p[1] - body[1]) + fabsf(p[2] - body[2]) + fabsf(p[3] - body[3]);
+                    if (d >= 64) { fout[j] = 1; stack[fsp++] = j; }
+                }
+            }
+            int enclosed_lab = 0;
+            for (int i = 0; i < n; i++) {
+                if (fout[i]) continue;
+                const uint8_t *p = px + i * 4;
+                float d = fabsf(p[0] - body[0]) + fabsf(p[1] - body[1]) + fabsf(p[2] - body[2]) + fabsf(p[3] - body[3]);
+                if (d >= 64) enclosed_lab++;
+            }
+            if (enclosed_lab >= 4) {
+                sx0 = w, sy0 = h, sx1 = -1, sy1 = -1;
+                for (int i = 0; i < n; i++) {
+                    S[i] = I[i] = (uint8_t)!fout[i];
+                    if (!fout[i]) {
+                        int x = i % w, y = i / w;
+                        if (x < sx0) sx0 = x;
+                        if (x > sx1) sx1 = x;
+                        if (y < sy0) sy0 = y;
+                        if (y > sy1) sy1 = y;
+                    }
+                }
+            }
+            free(fout);
+        }
         memset(hist, 0, sizeof hist);
         best = -1, bc = 0;
         int lx0 = w, ly0 = h, lx1 = -1, ly1 = -1;
@@ -1057,5 +1104,21 @@ void texpatch_relabel_atlas(uint8_t *img, int w, int h, int cell, int style) {
         int x0 = (k[i].cell % 8) * cell, y0 = (k[i].cell / 8) * cell;
         if (x0 + cell <= w && y0 + cell <= h) relabel(img, w, x0, y0, cell, cell, 3, false, k[i].role, st, dirty, bw);
     }
+    free(dirty);
+}
+
+// [XC3] Relabel one embedded single-button texture (LAGP wilay: mnu417_cont01, mnu623_cont02, ...) for Xbox / PlayStation.
+void texpatch_relabel_single(uint8_t *img, int w, int h, int slot, int style) {
+    static pthread_once_t font_once = PTHREAD_ONCE_INIT;
+    pthread_once(&font_once, load_font);
+    static const int8_t roles[] = {
+        [BIND_A] = R_A, [BIND_B] = R_B, [BIND_X] = R_X, [BIND_Y] = R_Y,
+        [BIND_L] = R_L, [BIND_R] = R_R, [BIND_ZL] = R_ZL, [BIND_ZR] = R_ZR,
+        [BIND_PLUS] = R_PLUS, [BIND_MINUS] = R_MINUS,
+    };
+    if (slot < 0 || slot >= (int)(sizeof roles / sizeof *roles) || !roles[slot]) return;
+    int bw = (w + 3) / 4, st = style == 1 ? STYLE_XBOX : STYLE_PS;
+    uint8_t *dirty = calloc((size_t)bw * ((h + 3) / 4), 1);
+    relabel(img, w, 0, 0, w, h, 3, false, roles[slot], st, dirty, bw);
     free(dirty);
 }

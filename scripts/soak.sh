@@ -4,10 +4,10 @@
 #   SOAK_EXE=build/xcde_soak.exe SOAK_SAVE=saves/colony9_20261019_1235 scripts/soak.sh <route> <secs> <outdir>
 # Extra env (XCDE_MEM_MAP=1, XCDE_LOWSPEC_CPUS=4, ...) passes through.
 cd "$(dirname "$0")/.."
-export PATH="/c/msys64/ucrt64/bin:$PATH"
+. scripts/env.sh
 ROUTE=$1; SECS=${2:-7200}; OUT=${3:-build/soak}
-EXE=${SOAK_EXE:-${XC3_EXE:-build/xc3.exe}}
-[ -f "$EXE" ] || [ -n "$SOAK_EXE" ] || [ -n "$XC3_EXE" ] || EXE="build/xcde.exe"
+EXE=${SOAK_EXE:-${XC3_EXE:-build/xc3${XC3_EXE_EXT}}}
+[ -f "$EXE" ] || [ -n "$SOAK_EXE" ] || [ -n "$XC3_EXE" ] || EXE="build/xcde${XC3_EXE_EXT}"
 NAME=$(basename "$EXE" .exe)
 mkdir -p "$OUT"
 SD=build/save_$NAME; rm -rf "$SD"; mkdir -p "$SD"
@@ -24,11 +24,19 @@ echo "time_s,pid,handles,private_mb,ws_mb,threads,cpu_s" > "$OUT/proc.csv"
 T0=$(date +%s)
 while kill -0 $PID 2>/dev/null; do
   now=$(( $(date +%s) - T0 ))
-  powershell -NoProfile -Command "Get-Process -Name $NAME -ErrorAction SilentlyContinue | ForEach-Object { '{0},{1},{2},{3:F0},{4:F0},{5},{6:F0}' -f $now,\$_.Id,\$_.HandleCount,(\$_.PrivateMemorySize64/1MB),(\$_.WorkingSet64/1MB),\$_.Threads.Count,\$_.TotalProcessorTime.TotalSeconds }" >> "$OUT/proc.csv"
+  if [ "$XC3_OS" = linux ]; then
+    ps -p $PID -o pid=,rss=,vsz=,nlwp=,etimes= 2>/dev/null | awk -v t="$now" '{printf "%s,%s,0,%.0f,%.0f,%s,%s\n", t, $1, $2/1024, $3/1024, $4, $5}' >> "$OUT/proc.csv"
+  else
+    powershell -NoProfile -Command "Get-Process -Name $NAME -ErrorAction SilentlyContinue | ForEach-Object { '{0},{1},{2},{3:F0},{4:F0},{5},{6:F0}' -f $now,\$_.Id,\$_.HandleCount,(\$_.PrivateMemorySize64/1MB),(\$_.WorkingSet64/1MB),\$_.Threads.Count,\$_.TotalProcessorTime.TotalSeconds }" >> "$OUT/proc.csv"
+  fi
   [ $now -ge $SECS ] && break
   sleep 60
 done
-WPID=$(cat /proc/$PID/winpid 2>/dev/null)
-kill $PID 2>/dev/null; sleep 3
-[ -n "$WPID" ] && taskkill //F //T //PID $WPID >/dev/null 2>&1
+if [ "$XC3_OS" = linux ]; then
+  kill $PID 2>/dev/null; sleep 3; kill -9 $PID 2>/dev/null || true
+else
+  WPID=$(cat /proc/$PID/winpid 2>/dev/null)
+  kill $PID 2>/dev/null; sleep 3
+  [ -n "$WPID" ] && taskkill //F //T //PID $WPID >/dev/null 2>&1
+fi
 echo "soak done after $(( $(date +%s) - T0 )) s" >> "$OUT/proc.csv"
