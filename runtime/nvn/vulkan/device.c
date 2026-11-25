@@ -66,6 +66,10 @@ static void create_instance(void) {
             if (!dup) ext[n_ext++] = dx[i];
         }
     }
+#ifdef __linux__
+    // [XC3] ffx-vk-linux: disable RADV DCC on storage image writes (~0.3 ms/frame faster FSR 4, neutral elsewhere)
+    setenv("radv_disable_dcc_stores", "true", 0);
+#endif
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
                              .pEngineName = "LARecomp", .apiVersion = VK_API_VERSION_1_3};
@@ -194,6 +198,14 @@ static void create_device(void) {
     if (g_vk.divisor) ext[n_ext++] = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
     g_vk.host_import = has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);  // guest heap as a GPU buffer (exec.c)
     if (g_vk.host_import) ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
+#ifdef __linux__
+    g_vk.dmabuf_export = has_ext(ep, ne, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+                         has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+    if (g_vk.dmabuf_export) {
+        ext[n_ext++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+        ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME;
+    }
+#endif
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     // [XCDE] the driver's real per-heap usage and budget for VMA (the [mem] report; a 512 MB iGPU carve-out shows how
@@ -222,30 +234,73 @@ static void create_device(void) {
     }
     if (gpl) { ext[n_ext++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME; ext[n_ext++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME; }
     g_vk.gpl = gpl;
+    // [XC3] Dynamic vertex input + Extended Dynamic State 3: moves vertex layout, polygon mode, blend state, color
+    // write mask and alpha-to-coverage out of the pipeline key so fewer pipelines and GPL pieces need compilation.
+    bool dyn_vi = has_ext(ep, ne, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+    { const char *e = getenv("XC3_DYN_VI"); if (e && !atoi(e)) dyn_vi = false; }
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vihave = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
+    if (dyn_vi) {
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &vihave};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        dyn_vi = vihave.vertexInputDynamicState != VK_FALSE;
+    }
+    if (dyn_vi) ext[n_ext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
+
+    bool dyn_eds3_ext = has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
+    { const char *e = getenv("XC3_DYN_EDS3"); if (e && !atoi(e)) dyn_eds3_ext = false; }
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT e3have = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+    bool dyn_poly = false, dyn_blend_en = false, dyn_blend_eq = false, dyn_wmask = false, dyn_a2c = false;
+    if (dyn_eds3_ext) {
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &e3have};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        dyn_poly = e3have.extendedDynamicState3PolygonMode != VK_FALSE;
+        dyn_blend_en = e3have.extendedDynamicState3ColorBlendEnable != VK_FALSE;
+        dyn_blend_eq = e3have.extendedDynamicState3ColorBlendEquation != VK_FALSE;
+        dyn_wmask = e3have.extendedDynamicState3ColorWriteMask != VK_FALSE;
+        dyn_a2c = e3have.extendedDynamicState3AlphaToCoverageEnable != VK_FALSE;
+        dyn_eds3_ext = dyn_poly || (dyn_blend_en && dyn_blend_eq) || dyn_wmask || dyn_a2c;
+    }
+    if (dyn_eds3_ext) ext[n_ext++] = VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME;
+    // [XC3] FSR 4 / FSR 3.1 compute shaders use compute shader derivatives where supported
+    bool comp_deriv = has_ext(ep, ne, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+    if (comp_deriv) ext[n_ext++] = VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME;
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
-    VkPhysicalDeviceRobustness2FeaturesEXT r2have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
-    // [XCDE] FSR 3 (temporal.c): its shaders use half floats and, on AMD, wave64 compute where the device has them
-    VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = robust2 ? &r2have : NULL};
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR cdhave = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR};
+    VkPhysicalDeviceRobustness2FeaturesEXT r2have = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT, .pNext = comp_deriv ? &cdhave : NULL};
+    // [XCDE] FSR 3 / FSR 4 (temporal.c): half floats, integer dot product, wave64 compute, 16-bit storage
+    VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+                                            .pNext = robust2 ? (void *)&r2have : comp_deriv ? (void *)&cdhave : NULL};
     VkPhysicalDeviceVulkan12Features h12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &h13};
-    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h12};
+    VkPhysicalDeviceVulkan11Features h11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &h12};
+    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h11};
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
     VkPhysicalDeviceRobustness2FeaturesEXT r2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
                                                  .robustBufferAccess2 = r2have.robustBufferAccess2 && have.features.robustBufferAccess};
     g_vk.robust2 = r2.robustBufferAccess2;
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR cdf = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR,
+        .computeDerivativeGroupQuads = cdhave.computeDerivativeGroupQuads,
+        .computeDerivativeGroupLinear = cdhave.computeDerivativeGroupLinear};
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT,
-        .vertexAttributeInstanceRateDivisor = VK_TRUE, .vertexAttributeInstanceRateZeroDivisor = VK_FALSE};
+        .vertexAttributeInstanceRateDivisor = VK_TRUE, .vertexAttributeInstanceRateZeroDivisor = VK_FALSE,
+        .pNext = comp_deriv ? (void *)&cdf : NULL};
     VkPhysicalDeviceCustomBorderColorFeaturesEXT cbc = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, .customBorderColors = VK_TRUE,
-        .customBorderColorWithoutFormat = VK_TRUE, .pNext = g_vk.divisor ? &div : NULL};
+        .customBorderColorWithoutFormat = VK_TRUE, .pNext = g_vk.divisor ? (void *)&div : comp_deriv ? (void *)&cdf : NULL};
     VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                             .dynamicRendering = VK_TRUE, .synchronization2 = VK_TRUE,
                                             .shaderDemoteToHelperInvocation = VK_TRUE, .shaderTerminateInvocation = VK_TRUE,
                                             .maintenance4 = VK_TRUE, .pipelineCreationCacheControl = VK_TRUE,  // [XCDE] T188
+                                            .shaderIntegerDotProduct = h13.shaderIntegerDotProduct,
                                             .subgroupSizeControl = h13.subgroupSizeControl, .computeFullSubgroups = h13.computeFullSubgroups,
-                                            .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
+                                            .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : comp_deriv ? (void *)&cdf : NULL};
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
@@ -255,12 +310,27 @@ static void create_device(void) {
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gplf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT,
                                                                .graphicsPipelineLibrary = VK_TRUE, .pNext = &f12};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-                                            .storageBuffer16BitAccess = VK_TRUE, .pNext = gpl ? (void *)&gplf : (void *)&f12};
+                                            .storageBuffer16BitAccess = VK_TRUE,
+                                            .uniformAndStorageBuffer16BitAccess = h11.uniformAndStorageBuffer16BitAccess,
+                                            .storagePushConstant16 = h11.storagePushConstant16,
+                                            .pNext = gpl ? (void *)&gplf : (void *)&f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     if (g_vk.robust2) { r2.pNext = fault ? (void *)&ff : (void *)&f11; }
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
                                    .pNext = g_vk.robust2 ? (void *)&r2 : fault ? (void *)&ff : (void *)&f11};
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vif = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT,
+        .vertexInputDynamicState = VK_TRUE};
+    if (dyn_vi) { vif.pNext = f.pNext; f.pNext = &vif; }
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT e3f = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
+        .extendedDynamicState3PolygonMode = dyn_poly ? VK_TRUE : VK_FALSE,
+        .extendedDynamicState3ColorBlendEnable = (dyn_blend_en && dyn_blend_eq) ? VK_TRUE : VK_FALSE,
+        .extendedDynamicState3ColorBlendEquation = (dyn_blend_en && dyn_blend_eq) ? VK_TRUE : VK_FALSE,
+        .extendedDynamicState3ColorWriteMask = dyn_wmask ? VK_TRUE : VK_FALSE,
+        .extendedDynamicState3AlphaToCoverageEnable = dyn_a2c ? VK_TRUE : VK_FALSE};
+    if (dyn_eds3_ext) { e3f.pNext = f.pNext; f.pNext = &e3f; }
     LOG("[vk] robustBufferAccess2: %s\n", g_vk.robust2 ? "on" : "not available");
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
@@ -272,6 +342,7 @@ static void create_device(void) {
     g_vk.astc_ldr = h->textureCompressionASTC_LDR != VK_FALSE;
     LOG("[vk] ASTC hardware decoding: %s\n", g_vk.astc_ldr ? "supported (GPU native)" : "software (CPU RGBA8)");
     b->shaderInt64 = h->shaderInt64;
+    b->shaderInt16 = h->shaderInt16;
     b->depthBiasClamp = h->depthBiasClamp;
     b->depthClamp = h->depthClamp;
     b->largePoints = h->largePoints;
@@ -349,6 +420,26 @@ static void create_device(void) {
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = nqi,
                              .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
+    if (dyn_vi) {
+        g_vk.set_vi = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetVertexInputEXT");
+        g_vk.dyn_vi = g_vk.set_vi != NULL;
+    }
+    if (dyn_eds3_ext) {
+        if (dyn_poly) g_vk.set_poly = (PFN_vkCmdSetPolygonModeEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetPolygonModeEXT");
+        if (dyn_blend_en && dyn_blend_eq) {
+            g_vk.set_blend_en = (PFN_vkCmdSetColorBlendEnableEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetColorBlendEnableEXT");
+            g_vk.set_blend_eq = (PFN_vkCmdSetColorBlendEquationEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetColorBlendEquationEXT");
+        }
+        if (dyn_wmask) g_vk.set_wmask = (PFN_vkCmdSetColorWriteMaskEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetColorWriteMaskEXT");
+        if (dyn_a2c) g_vk.set_a2c = (PFN_vkCmdSetAlphaToCoverageEnableEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetAlphaToCoverageEnableEXT");
+        g_vk.dyn_poly = g_vk.set_poly != NULL;
+        g_vk.dyn_blend_en = g_vk.set_blend_en != NULL && g_vk.set_blend_eq != NULL;
+        g_vk.dyn_blend_eq = g_vk.dyn_blend_en;
+        g_vk.dyn_wmask = g_vk.set_wmask != NULL;
+        g_vk.dyn_a2c = g_vk.set_a2c != NULL;
+    }
+    LOG("[vk] dynamic state: vertex_input=%d poly=%d blend=%d wmask=%d a2c=%d\n",
+        (int)g_vk.dyn_vi, (int)g_vk.dyn_poly, (int)(g_vk.dyn_blend_en && g_vk.dyn_blend_eq), (int)g_vk.dyn_wmask, (int)g_vk.dyn_a2c);
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
     for (int k = 0; k < 3; k++)
         if (g_vk.fg_fam[k] != UINT32_MAX) vkGetDeviceQueue(g_vk.dev, g_vk.fg_fam[k], g_vk.fg_idx[k], &g_vk.fg_queue[k]);
@@ -1402,6 +1493,19 @@ void ui_window_init(void) {
 }
 
 SDL_Window *ui_window(void) { return window; }
+
+void ui_display_size(int *w, int *h) {
+    SDL_DisplayID id = window ? SDL_GetDisplayForWindow(window) : 0;
+    if (!id) id = SDL_GetPrimaryDisplay();
+    const SDL_DisplayMode *dm = id ? SDL_GetDesktopDisplayMode(id) : NULL;
+    if (dm && dm->w > 0 && dm->h > 0) {
+        if (w) *w = dm->w;
+        if (h) *h = dm->h;
+        return;
+    }
+    if (w) *w = (int)g_vk.sc_extent.width;
+    if (h) *h = (int)g_vk.sc_extent.height;
+}
 
 void backend_init(void) {
     while (!atomic_load(&ui_ready)) SDL_Delay(1);

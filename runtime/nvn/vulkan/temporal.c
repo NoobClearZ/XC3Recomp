@@ -31,6 +31,11 @@ struct ffxCreateBackendVKDesc {
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#include <limits.h>
+#include <stdio.h>
+#include <unistd.h>
 #endif
 
 bool diag_deterministic(void);
@@ -63,9 +68,82 @@ static bool ffx_load(void) {
     LOG("[tmp] FidelityFX API loaded (%s)\n", dll);
     return true;
 #else
-    return false;
+    char exe_dir[PATH_MAX] = "";
+    {
+        ssize_t n = readlink("/proc/self/exe", exe_dir, sizeof exe_dir - 1);
+        if (n > 0) {
+            exe_dir[n] = '\0';
+            char *sl = strrchr(exe_dir, '/');
+            if (sl) *sl = '\0';
+            else exe_dir[0] = '\0';
+        }
+    }
+    char exe_so[PATH_MAX + 64] = "";
+    if (exe_dir[0]) snprintf(exe_so, sizeof exe_so, "%s/libffx_vk_linux.so", exe_dir);
+    const char *cands[] = {
+        exe_so[0] ? exe_so : NULL,
+        "build/libffx_vk_linux.so",
+        "sdk/ffx-vk-linux/build/libffx_vk_linux.so",
+        "libffx_vk_linux.so",
+        "libamd_fidelityfx_loader_vk.so",
+        "libamd_fidelityfx_vk.so",
+    };
+    void *m = NULL;
+    const char *so = NULL;
+    for (size_t i = 0; i < sizeof cands / sizeof cands[0]; i++) {
+        if (!cands[i]) continue;
+        m = dlopen(cands[i], RTLD_NOW);
+        if (m) { so = cands[i]; break; }
+    }
+    if (!m) {
+        LOG("[tmp] libffx_vk_linux.so / libamd_fidelityfx_loader_vk.so not found: FSR 3.1/4 unavailable (run Launcher Setup to install)\n");
+        return false;
+    }
+    typedef int (*PfnFfxvkLoad)(const char *);
+    typedef const char *(*PfnFfxvkError)(void);
+    PfnFfxvkLoad bridge_load = (PfnFfxvkLoad)dlsym(m, "ffxvkLoad");
+    if (bridge_load) {
+        PfnFfxvkError bridge_err = (PfnFfxvkError)dlsym(m, "ffxvkError");
+        const char *dll_dirs[] = {
+            getenv("FFXVK_DLL_DIR"),
+            exe_dir[0] ? exe_dir : NULL,
+            "build",
+            "third_party/fidelityfx",
+            "sdk/ffx/PrebuiltSignedDLL",
+        };
+        const char *picked = NULL;
+        for (size_t i = 0; i < sizeof dll_dirs / sizeof dll_dirs[0]; i++) {
+            if (!dll_dirs[i] || !dll_dirs[i][0]) continue;
+            char probe1[PATH_MAX + 64], probe2[PATH_MAX + 64];
+            snprintf(probe1, sizeof probe1, "%s/amd_fidelityfx_loader_vk.dll", dll_dirs[i]);
+            snprintf(probe2, sizeof probe2, "%s/amd_fidelityfx_upscaler_vk.dll", dll_dirs[i]);
+            if (access(probe1, R_OK) == 0 || access(probe2, R_OK) == 0) { picked = dll_dirs[i]; break; }
+        }
+        if (!picked) {
+            LOG("[tmp] %s loaded, but AMD FidelityFX DLLs not found in build/ or third_party/fidelityfx/\n", so);
+            dlclose(m);
+            return false;
+        }
+        if (bridge_load(picked) != 0) {
+            LOG("[tmp] ffxvkLoad(%s) failed: %s\n", picked, bridge_err ? bridge_err() : "unknown error");
+            dlclose(m);
+            return false;
+        }
+        LOG("[tmp] ffx-vk-linux loaded FidelityFX DLLs from %s\n", picked);
+    }
+    ffx_create = (PfnFfxCreateContext)dlsym(m, "ffxCreateContext");
+    ffx_destroy = (PfnFfxDestroyContext)dlsym(m, "ffxDestroyContext");
+    ffx_dispatch = (PfnFfxDispatch)dlsym(m, "ffxDispatch");
+    ffx_query = (PfnFfxQuery)dlsym(m, "ffxQuery");
+    ffx_configure = (PfnFfxConfigure)dlsym(m, "ffxConfigure");
+    if (!ffx_create || !ffx_destroy || !ffx_dispatch || !ffx_query || !ffx_configure) { dlclose(m); return false; }
+    ffx_state = 1;
+    LOG("[tmp] FidelityFX API loaded (%s)\n", so);
+    return true;
 #endif
 }
+
+bool fsr_available(void) { return ffx_load(); }
 
 static int env_int(const char *k) { const char *e = getenv(k); return e ? atoi(e) : 0; }
 

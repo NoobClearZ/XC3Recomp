@@ -119,7 +119,7 @@ static int xc3_libnx_patch(const char *ard, uint64_t *off, uint8_t **data, uint6
     if (!f) return 0;
     uint8_t h[0x30];
     uint32_t type = 0, ds = 0, cs = 0;
-    if (!_fseeki64(f, (long long)k_block, SEEK_SET) && fread(h, 1, 0x30, f) == 0x30)
+    if (!plat_fseek64(f, k_block, SEEK_SET) && fread(h, 1, 0x30, f) == 0x30)
         memcpy(&type, h + 4, 4), memcpy(&ds, h + 8, 4), memcpy(&cs, h + 12, 4);
     if (memcmp(h, "xbc1", 4) || strncmp((const char *)h + 0x14, "lib_nx.bin", 28) || type != 3 || cs > 65536 || ds > 65536) {
         fprintf(stderr, "[romfs] bf3.ard: lib_nx.bin not at %llx (another game version?): motion_blur / game_taa = 0 not applied\n", (unsigned long long)k_block);
@@ -173,9 +173,15 @@ static void maybe_edit(File *f) {
             int style = settings_mod_enabled("icons_keyboard") ? 0 : settings_mod_enabled("icons_xbox") ? 1
                       : settings_mod_enabled("icons_playstation") ? 2 : -1;
             extern int kbicons_ard_patches(const char *ard, int style, uint64_t *offs, uint8_t **datas, uint64_t *lens, int max);
-            uint64_t o[9], l[9];
-            uint8_t *d[9];
-            int n = style >= 0 && kbicons_init() ? kbicons_ard_patches(f->path, style, o, d, l, 8) : 0;
+            uint64_t o[32], l[32];
+            uint8_t *d[32];
+            int n = style >= 0 && kbicons_init() ? kbicons_ard_patches(f->path, style, o, d, l, 30) : 0;
+            {   // [XC3] Ultrawide battle Arts palette corner anchoring (if kbicons did not already patch mnu417_cont01.wilay)
+                extern int xc3_uw_ard_patch(const char *ard, uint64_t *off, uint8_t **data, uint64_t *len);
+                bool has_hud = false;
+                for (int i = 0; i < n; i++) if (o[i] == 0x23aef9d40ull) has_hud = true;
+                if (!has_hud) n += xc3_uw_ard_patch(f->path, o + n, d + n, l + n);
+            }
             n += xc3_libnx_patch(f->path, o + n, d + n, l + n);
             if (n) {
                 f->patch = calloc((size_t)n, sizeof *f->patch);

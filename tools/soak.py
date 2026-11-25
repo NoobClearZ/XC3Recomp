@@ -26,7 +26,10 @@ open(tour, 'w').write('\n'.join(l for j in pick for l in j) + '\n')
 
 def link(dst, src):
     if not os.path.exists(dst):
-        subprocess.run(['cmd', '/c', 'mklink', '/J', dst.replace('/', '\\'), src.replace('/', '\\')], capture_output=True)
+        if os.name == 'nt':
+            subprocess.run(['cmd', '/c', 'mklink', '/J', dst.replace('/', '\\'), src.replace('/', '\\')], capture_output=True)
+        else:
+            os.symlink(src, dst)
 
 os.makedirs(os.path.join(work, 'cache'), exist_ok=True)
 link(os.path.join(work, 'targets'), os.path.join(REPO, 'targets'))
@@ -38,7 +41,8 @@ shutil.copytree(SAVE, save)
 env = dict(os.environ, XCDE_TOUR=tour, XCDE_TOUR_EXIT='1', LARECOMP_AUDIO_GAIN='0', LARECOMP_HIDDEN='1',
            XCDE_INI=os.path.join(REPO, 'build', 'fps60.ini'), XCDE_INPUT_REPLAY=os.path.join(REPO, 'tests', 'routes', 'load_a.txt'),
            LARECOMP_SAVE_DIR=save, XCDE_LOAD_HOLD_MS='0', XCDE_REG_HOLD='0')
-env['PATH'] = 'C:\\msys64\\ucrt64\\bin;' + env.get('PATH', '')
+if os.name == 'nt':
+    env['PATH'] = 'C:\\msys64\\ucrt64\\bin;' + env.get('PATH', '')
 log = open(os.path.join(work, 'game.log'), 'w')
 mem = open(os.path.join(work, 'mem.tsv'), 'w')
 mem.write('sec\tprivate_mb\tworking_mb\thandles\tthreads\n')
@@ -47,9 +51,14 @@ print('soak: %d battles, pid %d' % (len(pick), p.pid), flush=True)
 t0 = time.time()
 while p.poll() is None and time.time() - t0 < 4 * 3600:
     time.sleep(30)
-    q = subprocess.run(['powershell', '-NoProfile', '-Command',
-                        '$x=Get-Process -Id %d -ErrorAction SilentlyContinue; if($x){"{0} {1} {2} {3}" -f [int]($x.PrivateMemorySize64/1MB),[int]($x.WorkingSet64/1MB),$x.HandleCount,$x.Threads.Count}' % p.pid],
-                       capture_output=True, text=True).stdout.split()
+    if os.name == 'nt':
+        q = subprocess.run(['powershell', '-NoProfile', '-Command',
+                            '$x=Get-Process -Id %d -ErrorAction SilentlyContinue; if($x){"{0} {1} {2} {3}" -f [int]($x.PrivateMemorySize64/1MB),[int]($x.WorkingSet64/1MB),$x.HandleCount,$x.Threads.Count}' % p.pid],
+                           capture_output=True, text=True).stdout.split()
+    else:
+        q = subprocess.run(['ps', '-p', str(p.pid), '-o', 'rss=,vsz=,nlwp='], capture_output=True, text=True).stdout.split()
+        if len(q) == 3:
+            q = [str(int(q[0]) // 1024), str(int(q[1]) // 1024), '0', q[2]]
     if len(q) == 4:
         mem.write('%d\t%s\t%s\t%s\t%s\n' % (time.time() - t0, *q))
         mem.flush()

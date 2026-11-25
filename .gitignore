@@ -1,6 +1,9 @@
 # Derived from the game: NEVER published (CONTRIBUTING.md, art. I)
 targets/
 build/
+/xenoblade3_launcher
+/xenoblade3_launcher.exe
+/xenoblade3_launcher.pdb
 generated/
 dump/
 *.nsp

@@ -15,6 +15,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/ucontext.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -23,15 +24,27 @@
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
 #endif
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
 
 // ---- guest address space
 // Everything readable/writable from the start, like macOS: the guest maps at 4K granularity, and untouched pages
-// cost nothing (MAP_NORESERVE: the 12 GB window doesn't count against overcommit).
+// cost nothing (MAP_NORESERVE: the window doesn't count against overcommit).
+static uint64_t g_lo, g_hi, g_pmem_lo, g_pmem_hi;
+static int g_pmem_fd_lo = -1, g_pmem_fd_hi = -1;
+static uint64_t g_pmem_lo_bytes;
+static PlatPmemDmabufFn g_pmem_dmabuf_alloc;
+
+void plat_pmem_set_dmabuf_alloc(PlatPmemDmabufFn fn) { g_pmem_dmabuf_alloc = fn; }
+
 bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     void *p = mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
     if (p == MAP_FAILED) return false;
     if (p != (void *)(uintptr_t)lo) { munmap(p, hi - lo); return false; }  // (kernels before 4.17: just a hint)
+    g_lo = lo;
+    g_hi = hi;
     return true;
 }
 
@@ -43,10 +56,52 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi) {
 
 void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
-bool plat_pmem_reserve(uint64_t lo, uint64_t hi) { (void)lo; (void)hi; return false; }  // [XC3] (Windows only)
-void *plat_pmem_create(uint64_t size) { (void)size; return NULL; }
-bool plat_pmem_map(uint64_t addr, uint64_t off) { (void)addr; (void)off; return false; }
-bool plat_pmem_unmap(uint64_t addr) { (void)addr; return false; }
+// [XC3] Physical memory pool (platform.h): reserve the alias region as PROT_NONE and back pool pages with memfd_create.
+bool plat_pmem_reserve(uint64_t lo, uint64_t hi) {
+    void *p = mmap((void *)(uintptr_t)lo, hi - lo, PROT_NONE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+    if (p == MAP_FAILED) return false;
+    if (p != (void *)(uintptr_t)lo) { munmap(p, hi - lo); return false; }
+    g_pmem_lo = lo;
+    g_pmem_hi = hi;
+    return true;
+}
+
+void *plat_pmem_create(uint64_t size) {
+    if (g_pmem_dmabuf_alloc) {
+        int fd_lo = -1, fd_hi = -1;
+        uint64_t lo_bytes = 0;
+        void *view = g_pmem_dmabuf_alloc(size, &fd_lo, &fd_hi, &lo_bytes);
+        if (view) {
+            g_pmem_fd_lo = fd_lo;
+            g_pmem_fd_hi = fd_hi;
+            g_pmem_lo_bytes = lo_bytes;
+            return view;
+        }
+    }
+    int fd = memfd_create("xc3_pmem", MFD_CLOEXEC);
+    if (fd < 0) return NULL;
+    if (ftruncate(fd, (off_t)size) != 0) { close(fd); return NULL; }
+    void *view = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (view == MAP_FAILED) { close(fd); return NULL; }
+    g_pmem_fd_lo = fd;
+    g_pmem_fd_hi = -1;
+    g_pmem_lo_bytes = size;
+    return view;
+}
+
+bool plat_pmem_map(uint64_t addr, uint64_t off) {
+    int fd = off < g_pmem_lo_bytes ? g_pmem_fd_lo : g_pmem_fd_hi;
+    uint64_t foff = off < g_pmem_lo_bytes ? off : off - g_pmem_lo_bytes;
+    if (fd < 0) return false;
+    return mmap((void *)(uintptr_t)addr, PLAT_PMEM_PAGE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+                fd, (off_t)foff) == (void *)(uintptr_t)addr;
+}
+
+bool plat_pmem_unmap(uint64_t addr) {
+    return mmap((void *)(uintptr_t)addr, PLAT_PMEM_PAGE, PROT_NONE,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0) == (void *)(uintptr_t)addr;
+}
 
 int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page) {  // (no write tracking)
     (void)addr; (void)size; (void)pages; (void)max; (void)page;
@@ -56,6 +111,18 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
     int p = prot == PLAT_PROT_NONE ? PROT_NONE : prot == PLAT_PROT_READ ? PROT_READ : PROT_READ | PROT_WRITE;
     return mprotect((void *)(uintptr_t)addr, size, p);
+}
+
+bool plat_mem_readable(uint64_t addr, size_t size) {
+    if (!addr) return false;
+    uint64_t end = addr + (size ? size : 1);
+    pid_t pid = getpid();
+    for (uint64_t a = addr; a < end; a = (a | 4095ull) + 1) {
+        uint8_t byte = 0;
+        struct iovec loc = {&byte, 1}, rem = {(void *)(uintptr_t)a, 1};
+        if (process_vm_readv(pid, &loc, 1, &rem, 1, 0) != 1) return false;
+    }
+    return true;
 }
 
 // ---- time
@@ -80,38 +147,39 @@ void plat_thread_realtime(uint64_t period_ns) {
 }
 
 // ---- process
-// Started from a desktop (the AppImage) there is no terminal: stdout / stderr go to lasrecomp.log in the data folder
-// (runtime/paths.h; rt_paths_init runs later, so the same rule is applied here). Processes started by this one (the
-// start screen re-executing itself for the game) append to the same log.
+// Started from a desktop there is no terminal: stdout / stderr go to xc3.log in the data folder.
 static char g_log_path[1024];
 
 static void log_to_file_without_terminal(void) {
     if (isatty(STDERR_FILENO)) return;
     char dir[900];
-    const char *env = getenv("LARECOMP_DATA_ROOT"), *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+    const char *env = getenv("XC3_DATA_ROOT");
+    if (!env || !*env) env = getenv("LARECOMP_DATA_ROOT");
+    const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
     struct stat st;
     if (env && *env) snprintf(dir, sizeof dir, "%s", env);
-    else if (stat("extracted", &st) == 0 && S_ISDIR(st.st_mode)) return;  // dev mode: wherever stderr goes already
-    else if (xdg && *xdg == '/') snprintf(dir, sizeof dir, "%s/lasrecomp", xdg);
-    else snprintf(dir, sizeof dir, "%s/.local/share/lasrecomp", home && *home ? home : "/tmp");
+    else if ((stat("targets", &st) == 0 && S_ISDIR(st.st_mode)) ||
+             (stat("extracted", &st) == 0 && S_ISDIR(st.st_mode))) return;  // dev mode: wherever stderr goes already
+    else if (xdg && *xdg == '/') snprintf(dir, sizeof dir, "%s/xc3recomp", xdg);
+    else snprintf(dir, sizeof dir, "%s/.local/share/xc3recomp", home && *home ? home : "/tmp");
     for (char *c = dir + 1; *c; c++)
         if (*c == '/') { *c = 0; mkdir(dir, 0755); *c = '/'; }
     mkdir(dir, 0755);
-    snprintf(g_log_path, sizeof g_log_path, "%s/lasrecomp.log", dir);
-    bool append = getenv("LASRECOMP_LOG_APPEND") != NULL;
+    snprintf(g_log_path, sizeof g_log_path, "%s/xc3.log", dir);
+    bool append = getenv("XC3_LOG_APPEND") != NULL || getenv("LASRECOMP_LOG_APPEND") != NULL;
     if (!freopen(g_log_path, append ? "a" : "w", stderr)) { g_log_path[0] = 0; return; }
     dup2(STDERR_FILENO, STDOUT_FILENO);
-    setenv("LASRECOMP_LOG_APPEND", "1", 1);
+    setenv("XC3_LOG_APPEND", "1", 1);
 }
 
 #if defined(__x86_64__)
-// The recompiled game code is built for x86-64-v3 (Makefile GENARCH: AVX2, FMA, BMI2): say so instead of crashing
-// with an illegal instruction on an older CPU.
+// Matches -march=x86_64_v2 used by the build scripts (SSE4.2 + POPCNT minimum).
+// Uses CPUID directly: zig's compiler-rt __builtin_cpu_supports() reports 0 on Linux.
+#include <cpuid.h>
 static void require_cpu(void) {
-    __builtin_cpu_init();
-    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
-    fprintf(stderr, "FATAL: LAS Recomp needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or "
-                    "newer).\n");
+    unsigned a, b, c, d;
+    if (__get_cpuid(1, &a, &b, &c, &d) && (c & (1u << 20)) /* SSE4.2 */ && (c & (1u << 23)) /* POPCNT */) return;
+    fprintf(stderr, "FATAL: XC3Recomp needs an x86-64-v2 CPU (SSE4.2 and POPCNT).\n");
     exit(1);
 }
 #else
@@ -170,8 +238,8 @@ void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
     char text[1200];
-    snprintf(text, sizeof text, "LAS Recomp stopped because of an error.\n\nDetails: %s", g_log_path);
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp", text, NULL);
+    snprintf(text, sizeof text, "XC3Recomp stopped because of an error.\n\nDetails: %s", g_log_path);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "XC3Recomp", text, NULL);
 }
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
@@ -190,7 +258,7 @@ void plat_print_backtrace(void) {
         if (!s && ours) s = rt_host_fn_name(pc, &off);
         const char *mod = di.dli_fname ? (strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname) : "?";
         uint64_t moff = pc - (uint64_t)(uintptr_t)di.dli_fbase;
-        if (s && ours) fprintf(stderr, "  #%-2d %016llx %s+%llx (lasrecomp+%llx)\n", i, (unsigned long long)pc, s,
+        if (s && ours) fprintf(stderr, "  #%-2d %016llx %s+%llx (xc3+%llx)\n", i, (unsigned long long)pc, s,
                                (unsigned long long)off, (unsigned long long)moff);
         else if (s) fprintf(stderr, "  #%-2d %016llx %s+%llx (%s)\n", i, (unsigned long long)pc, s, (unsigned long long)off, mod);
         else fprintf(stderr, "  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, mod, (unsigned long long)moff);
@@ -274,14 +342,104 @@ bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPT
 // while the game's threads still submitted work.
 void plat_terminate(void) { _exit(0); }
 
+// [XCDE] T169: memory report helpers used by runtime/nvn/vulkan/exec.c
+void plat_mem_info(uint64_t *priv, uint64_t *ws, uint64_t *guest_commit) {
+    *priv = *ws = *guest_commit = 0;
+    long pg = sysconf(_SC_PAGESIZE);
+    if (pg <= 0) pg = 4096;
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (f) {
+        unsigned long size = 0, res = 0, shared = 0;
+        if (fscanf(f, "%lu %lu %lu", &size, &res, &shared) >= 2) {
+            *ws = (uint64_t)res * (uint64_t)pg;
+            *priv = res > shared ? (uint64_t)(res - shared) * (uint64_t)pg : *ws;
+        }
+        fclose(f);
+    }
+    uint64_t wlo = g_pmem_lo && g_pmem_lo < g_lo ? g_pmem_lo : g_lo;
+    uint64_t whi = g_hi;
+    FILE *smaps = fopen("/proc/self/smaps", "r");
+    if (smaps && whi > wlo) {
+        char line[512];
+        bool in_guest = false;
+        while (fgets(line, sizeof line, smaps)) {
+            unsigned long long a = 0, b = 0;
+            if (sscanf(line, "%llx-%llx ", &a, &b) == 2) {
+                in_guest = (a >= wlo && b <= whi);
+            } else if (in_guest && strncmp(line, "Rss:", 4) == 0) {
+                unsigned long long kb = 0;
+                if (sscanf(line + 4, "%llu", &kb) == 1) *guest_commit += kb * 1024ull;
+            }
+        }
+        fclose(smaps);
+    } else {
+        *guest_commit = *priv;
+    }
+}
+
+void plat_mem_map(void) {
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return;
+    typedef struct { uint64_t base, bytes; char name[64]; } MapEntry;
+    static MapEntry entries[4096];
+    int n = 0;
+    uint64_t total = 0, small = 0;
+    uint64_t wlo = g_pmem_lo && g_pmem_lo < g_lo ? g_pmem_lo : g_lo;
+    uint64_t whi = g_hi;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        unsigned long long a = 0, b = 0;
+        char perms[8] = "";
+        unsigned long long off = 0, inode = 0;
+        char dev[32] = "", path[256] = "";
+        int fields = sscanf(line, "%llx-%llx %7s %llx %31s %llu %255[^\n]", &a, &b, perms, &off, dev, &inode, path);
+        if (fields < 2) continue;
+        if (wlo && a >= wlo && b <= whi) continue;
+        if (perms[0] != 'r' && perms[1] != 'w') continue;
+        if (inode != 0 && strchr(perms, 'p') == NULL) continue;
+        uint64_t sz = b - a;
+        total += sz;
+        if (sz < (1u << 20)) small += sz;
+        if (n < 4096) {
+            entries[n].base = a;
+            entries[n].bytes = sz;
+            const char *p = path;
+            while (*p == ' ') p++;
+            snprintf(entries[n].name, sizeof entries[n].name, "%s", *p ? p : "[anon]");
+            n++;
+        }
+    }
+    fclose(f);
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++)
+            if (entries[j].bytes > entries[i].bytes) { MapEntry t = entries[i]; entries[i] = entries[j]; entries[j] = t; }
+    fprintf(stderr, "[memmap] mapped outside the guest window: %.0f MB in %d regions (%.0f MB under 1 MB)\n",
+            total / 1048576.0, n, small / 1048576.0);
+    for (int i = 0; i < n && i < 24; i++)
+        fprintf(stderr, "[memmap]   %#llx  %8.1f MB  %s\n", (unsigned long long)entries[i].base,
+                entries[i].bytes / 1048576.0, entries[i].name);
+}
+
 // [XCDE] T122: not sampled on this platform
 uint64_t plat_thread_pc(void *pthread_handle) { (void)pthread_handle; return 0; }
-void plat_thread_name(const char *name) { (void)name; }
-void plat_thread_background(void) {}
-void plat_thread_audio(void) {}
+void plat_thread_name(const char *name) {
+    char buf[16];
+    snprintf(buf, sizeof buf, "%.15s", name ? name : "");
+    pthread_setname_np(pthread_self(), buf);
+}
+void plat_thread_background(void) {
+    const char *e = getenv("LARECOMP_WORKER_PRIO");
+    if (e && atoi(e) == 0) return;
+    setpriority(PRIO_PROCESS, (id_t)gettid(), 10);
+}
+void plat_thread_audio(void) {
+    const char *e = getenv("LARECOMP_AUDIO_PRIO");
+    if (e && atoi(e) == 0) return;
+    setpriority(PRIO_PROCESS, (id_t)gettid(), -10);
+}
 int plat_cpu_count(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n > 0 ? (int)n : 4; }
 
 // [XCDE] T122: not available on this platform
 int plat_thread_backtrace(void *pthread_handle, uint64_t *pcs, int max) { (void)pthread_handle; (void)pcs; (void)max; return 0; }
-int plat_guest_find(const unsigned char *pat, unsigned long n, unsigned long long *out, int max) { (void)pat; (void)n; (void)out; (void)max; return 0; }  // [XCDE] (not wired)
-unsigned long long plat_guest_dump(const char *path) { (void)path; return 0; }  // [XCDE] (not wired)
+int plat_guest_find(const uint8_t *pat, size_t n, uint64_t *out, int max) { (void)pat; (void)n; (void)out; (void)max; return 0; }  // [XCDE] (not wired)
+uint64_t plat_guest_dump(const char *path) { (void)path; return 0; }  // [XCDE] (not wired)

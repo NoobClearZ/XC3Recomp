@@ -4,9 +4,9 @@
 # Creates play/<timestamp>/ with shot_NNNNNN.png (window captures), input.txt (your inputs, replayable with
 # XCDE_INPUT_REPLAY), game.log, and crash/ reports if it crashes. Nothing here is committed (play/ and crash/ are ignored).
 cd "$(dirname "$0")/.."
-export PATH="/c/msys64/ucrt64/bin:$PATH"
-EXE="build/xc3.exe"
-[ -f "$EXE" ] || EXE="build/xcde.exe"
+. scripts/env.sh
+EXE="build/xc3${XC3_EXE_EXT}"
+[ -f "$EXE" ] || EXE="build/xcde${XC3_EXE_EXT}"
 if [ ! -f cache/precompile_done.txt ]; then  # [XC3] shader precompilation to SPIR-V, once (~3 min; delete the file to redo)
   echo "Precompiling shaders (once, ~3 min)..."
   "$EXE" --precompile targets 2>&1 | grep -a --line-buffered "^\[precompile\] [0-9]* files\|FATAL"

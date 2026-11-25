@@ -19,9 +19,14 @@
 #ifdef _WIN32
 #include <direct.h>
 #include <windows.h>
+#else
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include "../input_bind.h"
+#include "../platform.h"
 
 #define BCDEC_IMPLEMENTATION
 #define BCDEC_STATIC
@@ -54,6 +59,12 @@ static const struct { const char *file; int tex, slot; } k_single[] = {
     {"mnu061_cont01.wilay", 4, BIND_Y}, {"mnu061_cont02.wilay", 4, BIND_Y}, {"mnu061_cont03.wilay", 4, BIND_Y},
     {"mnu069_cont01.wilay", 5, BIND_R},
     {"mnu073_cont03.wilay", 2, BIND_ZR},
+    // [XC3] embedded button glyphs inside bf3.ard LAGP layouts
+    {"mnu122_cont01.wilay", 12, BIND_R}, {"mnu122_cont01.wilay", 13, BIND_L},
+    {"mnu417_cont01.wilay", 117, BIND_ZL}, {"mnu417_cont01.wilay", 120, BIND_ZL}, {"mnu417_cont01.wilay", 121, BIND_ZR},
+    {"mnu420_cont01.wilay", 5, BIND_A},
+    {"mnu615_cont01.wilay", 7, BIND_A}, {"mnu615_cont01.wilay", 8, BIND_A},
+    {"mnu623_cont02.wilay", 9, BIND_B}, {"mnu623_cont02.wilay", 10, BIND_A},
 };
 #define N_SINGLE (sizeof k_single / sizeof *k_single)
 
@@ -137,7 +148,14 @@ static stbtt_fontinfo g_font;
 static unsigned char *g_font_data;
 static bool font_load(void) {
     if (g_font_data) return true;
-    static const char *const fonts[] = {"C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/segoeui.ttf"};
+    static const char *const fonts[] = {
+        "C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/segoeui.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", "/usr/share/fonts/TTF/OpenSans-Bold.ttf",
+        "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    };
     for (size_t i = 0; i < sizeof fonts / sizeof *fonts; i++) {
         FILE *f = fopen(fonts[i], "rb");
         if (!f) continue;
@@ -145,7 +163,11 @@ static bool font_load(void) {
         long n = ftell(f);
         fseek(f, 0, SEEK_SET);
         g_font_data = malloc((size_t)n);
-        if (fread(g_font_data, 1, (size_t)n, f) == (size_t)n && stbtt_InitFont(&g_font, g_font_data, 0)) { fclose(f); return true; }
+        if (fread(g_font_data, 1, (size_t)n, f) == (size_t)n &&
+            stbtt_InitFont(&g_font, g_font_data, stbtt_GetFontOffsetForIndex(g_font_data, 0))) {
+            fclose(f);
+            return true;
+        }
         fclose(f);
         free(g_font_data);
         g_font_data = NULL;
@@ -538,7 +560,7 @@ static uint8_t *kbicons_draw(const char *path, uint64_t *len) {
 }
 // [XC3] the same from a buffer (taken: freed here); path: the file's name as the game's menu/image/<file>
 static uint8_t *kbicons_draw_buf(const char *path, uint8_t *d, size_t n, uint64_t *len) {
-    if (!font_load()) { LOGK("no system font\n"); free(d); return NULL; }
+    if (!g_pad_style && !font_load()) { LOGK("no system font\n"); free(d); return NULL; }
     if (getenv("XCDE_KBICONS_DUMP")) LOGK("%s: draw\n", path);
     if (n >= 0x30 && !memcmp(d, "xbc1", 4)) {  // (zlib-compressed)
         uint32_t dsz, csz;
@@ -571,15 +593,30 @@ static uint8_t *kbicons_draw_buf(const char *path, uint8_t *d, size_t n, uint64_
             uint8_t *px = decode(blk, size - 0x28, w, h, fmt);
             if (!px) { LOGK("%s #%d: %dx%d format %d not decoded\n", path, k_single[i].tex, w, h, fmt); continue; }
             Img im = {px, w, h};
-            static Key k;
-            if (key_make(&im, 0, 0, w, h, &k)) key_draw_at(&im, &k, 0, 0, slot_label(k_single[i].slot), false);
+            extern void texpatch_relabel_single(uint8_t *img, int w, int h, int slot, int style);
+            if (g_pad_style) {
+                texpatch_relabel_single(px, w, h, k_single[i].slot, g_pad_style);
+            } else {
+                static Key k;
+                if (key_make(&im, 0, 0, w, h, &k)) key_draw_at(&im, &k, 0, 0, slot_label(k_single[i].slot), false);
+            }
+            const char *dump = getenv("XCDE_KBICONS_DUMP");
+            if (dump) {
+                char p[512];
+                const char *b = strrchr(path, '/');
+                snprintf(p, sizeof p, "%s/%s_%d_%dx%d.rgba", dump, b ? b + 1 : path, k_single[i].tex, w, h);
+                FILE *o = fopen(p, "wb");
+                if (o) fwrite(px, 4, (size_t)w * h, o), fclose(o);
+            }
             size_t bl;
             uint8_t *bc = encode_bc3(px, w, h, &bl);
             free(px);
             if (bl + 0x28 <= size) {
                 memset(blk, 0, size);
                 memcpy(blk, bc, bl);
-                uint32_t nf[10] = {(uint32_t)bl, ft[1], (uint32_t)w, (uint32_t)h, 1, 1, 68, 1, ft[8], 0};
+                size_t data = (bl + 0xfff) & ~(size_t)0xfff;
+                uint32_t dsz_f = (uint32_t)(data + 0x28 <= size ? data : bl);
+                uint32_t nf[10] = {dsz_f, ft[1], (uint32_t)w, (uint32_t)h, 1, 1, 68, 1, ft[8], 0};
                 memcpy(nf + 9, "LBIM", 4);
                 memcpy(blk + size - 0x28, nf, 0x28);
                 any = true;
@@ -637,10 +674,54 @@ done:
 // Drawn once per set of bindings: cache/kbicons/<file>_<key>.wilay, the key a hash of what the drawing depends on (the
 // key bindings, the mouse camera, the game's file, this code's version). A launch with the same bindings reads that
 // file; a change draws again (and removes that file's older copies).
-#define KBICONS_VERSION 4
+#define KBICONS_VERSION 6
 static uint64_t fnv(uint64_t h, const void *p, size_t n) {
     for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 0x100000001b3ull;
     return h;
+}
+static void kbicons_cache_prune(const char *prefix, const char *keep) {
+#ifdef _WIN32
+    _mkdir("cache"), _mkdir("cache/kbicons");
+    char pat[512];
+    snprintf(pat, sizeof pat, "cache/kbicons/%s*", prefix);
+    WIN32_FIND_DATAA fd;
+    HANDLE fh = FindFirstFileA(pat, &fd);
+    if (fh != INVALID_HANDLE_VALUE) {
+        do {
+            char old[512];
+            snprintf(old, sizeof old, "cache/kbicons/%s", fd.cFileName);
+            if (strcmp(old, keep)) DeleteFileA(old);
+        } while (FindNextFileA(fh, &fd));
+        FindClose(fh);
+    }
+#else
+    mkdir("cache", 0755);
+    mkdir("cache/kbicons", 0755);
+    DIR *dir = opendir("cache/kbicons");
+    if (dir) {
+        size_t plen = strlen(prefix);
+        struct dirent *de;
+        while ((de = readdir(dir))) {
+            if (!strncmp(de->d_name, prefix, plen)) {
+                char old[512];
+                snprintf(old, sizeof old, "cache/kbicons/%s", de->d_name);
+                if (strcmp(old, keep)) unlink(old);
+            }
+        }
+        closedir(dir);
+    }
+#endif
+}
+static void kbicons_cache_write(const char *prefix, const char *cp, const void *d, size_t len) {
+    kbicons_cache_prune(prefix, cp);
+    char tmp[520];
+    snprintf(tmp, sizeof tmp, "%s.tmp", cp);
+    FILE *o = fopen(tmp, "wb");
+    if (o) {
+        bool ok = fwrite(d, 1, len, o) == len;
+        ok = fclose(o) == 0 && ok;
+        if (ok) rename(tmp, cp); else remove(tmp);
+    }
 }
 uint8_t *kbicons_make(const char *path, uint64_t *len) {
     const char *base = strrchr(path, '/');
@@ -654,8 +735,9 @@ uint8_t *kbicons_make(const char *path, uint64_t *len) {
     h = fnv(h, base, strlen(base));
     FILE *src = fopen(path, "rb");
     if (src) { fseek(src, 0, SEEK_END); long sz = ftell(src); fclose(src); h = fnv(h, &sz, sizeof sz); }
-    char cp[512];
-    snprintf(cp, sizeof cp, "cache/kbicons/%s_%016llx", base, (unsigned long long)h);
+    char cp[512], prefix[256];
+    snprintf(prefix, sizeof prefix, "%s_", base);
+    snprintf(cp, sizeof cp, "cache/kbicons/%s%016llx", prefix, (unsigned long long)h);
     size_t n;
     uint8_t *d = getenv("XCDE_KBICONS_DUMP") ? NULL : read_all(cp, &n);
     if (d && n > 0x1000 && (!memcmp(d, "LAHD", 4) || !memcmp(d, "LAGP", 4))) { *len = n; return d; }
@@ -664,29 +746,7 @@ uint8_t *kbicons_make(const char *path, uint64_t *len) {
     d = kbicons_draw(path, len);
     if (!d) return NULL;
     LOGK("%s drawn in %.1f ms\n", base, (SDL_GetTicksNS() - t0) / 1e6);
-#ifdef _WIN32
-    _mkdir("cache"), _mkdir("cache/kbicons");
-    char pat[512];  // (the older copies of this file)
-    snprintf(pat, sizeof pat, "cache/kbicons/%s_*", base);
-    WIN32_FIND_DATAA fd;
-    HANDLE fh = FindFirstFileA(pat, &fd);
-    if (fh != INVALID_HANDLE_VALUE) {
-        do {
-            char old[512];
-            snprintf(old, sizeof old, "cache/kbicons/%s", fd.cFileName);
-            if (strcmp(old, cp)) DeleteFileA(old);
-        } while (FindNextFileA(fh, &fd));
-        FindClose(fh);
-    }
-#endif
-    char tmp[520];
-    snprintf(tmp, sizeof tmp, "%s.tmp", cp);
-    FILE *o = fopen(tmp, "wb");
-    if (o) {
-        bool ok = fwrite(d, 1, (size_t)*len, o) == (size_t)*len;
-        ok = fclose(o) == 0 && ok;
-        if (ok) rename(tmp, cp); else remove(tmp);
-    }
+    kbicons_cache_write(prefix, cp, d, (size_t)*len);
     return d;
 }
 
@@ -695,28 +755,66 @@ bool kbicons_init(void) { return true; }
 // [XC3] XC3 keeps its UI files inside bf3.ard as xbc1 blocks (a 0x30-byte header: "xbc1", type 1 zlib / 3 zstd,
 // decompressed size, compressed size, a hash, the file name; then the data), read by the game at the offsets its
 // bf3.arh lists. The button atlas is redrawn and served in place of its block (romfs_virtual.c rvfs_read patches):
-// the new block must fit the old one's compressed size, so the game's offsets and sizes stay. Known blocks of 2.2.0;
+// the new block must fit the old one's compressed size, so the game's offsets and sizes stay. Known blocks of 2.2.0 / 2.2.1;
 // each is checked by its header's name, and left alone on any mismatch.
 #include <zstd.h>
+#include "../hle/ultrawide.h"
 static const struct { uint64_t off; const char *name; } k_ard_blocks[] = {
     {0x22d6aa4e0ull, "icon_button.wilay"},
     {0x22b703630ull, "font_icon.wilay"},
     {0x22d6b0d10ull, "icon_button_y.wilay"},  // (576x288, 72 px cells: the prompts beside text, "Y Quick Save")
     {0x22d6c4da0ull, "icon_button_y_2.wilay"},
+    {0x236bea0a0ull, "mnu122_cont01.wilay"},  // (embedded L / R buttons)
+    {0x23aef9d40ull, "mnu417_cont01.wilay"},  // (battle HUD: embedded ZL / ZR buttons)
+    {0x23b011fb0ull, "mnu420_cont01.wilay"},  // (hold-A ring: embedded A button)
+    {0x23b2d7d60ull, "mnu615_cont01.wilay"},  // (embedded A buttons)
+    {0x23b3ccf20ull, "mnu623_cont02.wilay"},  // (skirmish prompt: embedded A / B buttons)
 };
 int kbicons_ard_patches(const char *ard, int style, uint64_t *offs, uint8_t **datas, uint64_t *lens, int max) {
     int np = 0;
     g_pad_style = style;
     FILE *f = fopen(ard, "rb");
     if (!f) return 0;
+    bool dumping = getenv("XCDE_KBICONS_DUMP") != NULL;
     for (size_t i = 0; i < sizeof k_ard_blocks / sizeof *k_ard_blocks && np < max; i++) {
         uint8_t h[0x30];
-        if (_fseeki64(f, (long long)k_ard_blocks[i].off, SEEK_SET) || fread(h, 1, 0x30, f) != 0x30) continue;
+        if (plat_fseek64(f, k_ard_blocks[i].off, SEEK_SET) || fread(h, 1, 0x30, f) != 0x30) continue;
         uint32_t type, ds, cs;
         memcpy(&type, h + 4, 4), memcpy(&ds, h + 8, 4), memcpy(&cs, h + 12, 4);
         if (memcmp(h, "xbc1", 4) || strncmp((const char *)h + 0x14, k_ard_blocks[i].name, 28) || type != 3 || cs > (8u << 20) || ds > (32u << 20)) {
             LOGK("bf3.ard: %s not at %llx (another game version?)\n", k_ard_blocks[i].name, (unsigned long long)k_ard_blocks[i].off);
             continue;
+        }
+        uint64_t ch = 0xcbf29ce484222325ull;
+        int ver = KBICONS_VERSION;
+        ch = fnv(ch, &ver, sizeof ver);
+        ch = fnv(ch, &style, sizeof style);
+        ch = fnv(ch, g_bind_pad, sizeof g_bind_pad);
+        ch = fnv(ch, g_bind_key, sizeof g_bind_key);
+        ch = fnv(ch, g_bind_key2, sizeof g_bind_key2);
+        ch = fnv(ch, &g_mouse_look, sizeof g_mouse_look);
+        ch = fnv(ch, &k_ard_blocks[i].off, sizeof k_ard_blocks[i].off);
+        ch = fnv(ch, &ds, sizeof ds);
+        ch = fnv(ch, &cs, sizeof cs);
+        ch = fnv(ch, k_ard_blocks[i].name, strlen(k_ard_blocks[i].name));
+        bool uw_hud = !strcmp(k_ard_blocks[i].name, "mnu417_cont01.wilay") && xc3_ui_fit_scale() < 1.0f;
+        if (uw_hud) {
+            float uw_k = xc3_ui_fit_scale();
+            ch = fnv(ch, &uw_k, sizeof uw_k);
+        }
+        char prefix[256], cp[512];
+        snprintf(prefix, sizeof prefix, "ard_%s_", k_ard_blocks[i].name);
+        snprintf(cp, sizeof cp, "cache/kbicons/%s%016llx", prefix, (unsigned long long)ch);
+        if (!dumping) {
+            size_t cn;
+            uint8_t *cd = read_all(cp, &cn);
+            if (cd && cn == 0x30 + (size_t)cs && !memcmp(cd, "xbc1", 4)) {
+                offs[np] = k_ard_blocks[i].off, datas[np] = cd, lens[np] = cn;
+                LOGK("bf3.ard %s: cached (%zu bytes)\n", k_ard_blocks[i].name, cn);
+                np++;
+                continue;
+            }
+            free(cd);
         }
         uint8_t *c = malloc(cs), *d = malloc(ds);
         size_t got = fread(c, 1, cs, f) == cs ? ZSTD_decompress(d, ds, c, cs) : 0;
@@ -727,9 +825,11 @@ int kbicons_ard_patches(const char *ard, int style, uint64_t *offs, uint8_t **da
         uint64_t nlen;
         uint8_t *nd = kbicons_draw_buf(path, d, got, &nlen);
         if (!nd) continue;
+        if (uw_hud) xc3_uw_patch_battle_hud(nd, (size_t)nlen);
         size_t cap = ZSTD_compressBound(nlen);
         uint8_t *blk = calloc(1, 0x30 + (cap > cs ? cap : cs));
-        size_t ncs = ZSTD_compress(blk + 0x30, cap, nd, nlen, 19);
+        size_t ncs = ZSTD_compress(blk + 0x30, cap, nd, nlen, 16);
+        if (ZSTD_isError(ncs) || ncs > cs) ncs = ZSTD_compress(blk + 0x30, cap, nd, nlen, 19);
         free(nd);
         if (ZSTD_isError(ncs) || ncs > cs) {
             LOGK("bf3.ard %s: redrawn block %zu bytes, the game's is %u - not used\n", k_ard_blocks[i].name, ZSTD_isError(ncs) ? 0 : ncs, cs);
@@ -739,7 +839,9 @@ int kbicons_ard_patches(const char *ard, int style, uint64_t *offs, uint8_t **da
         memcpy(blk, h, 0x30);
         uint32_t nds = (uint32_t)nlen, ncs32 = (uint32_t)ncs;
         memcpy(blk + 8, &nds, 4), memcpy(blk + 12, &ncs32, 4);
-        offs[np] = k_ard_blocks[i].off, datas[np] = blk, lens[np] = 0x30 + (uint64_t)cs;  // (the old span: rest zero)
+        size_t span = 0x30 + (size_t)cs;
+        kbicons_cache_write(prefix, cp, blk, span);
+        offs[np] = k_ard_blocks[i].off, datas[np] = blk, lens[np] = span;  // (the old span: rest zero)
         LOGK("bf3.ard %s: redrawn (%u -> %u bytes decompressed, %u -> %zu compressed)\n", k_ard_blocks[i].name, ds, nds, cs, ncs);
         np++;
     }

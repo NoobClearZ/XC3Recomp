@@ -85,4 +85,8 @@ uint64_t kernel_heap_size(void);  // bytes from HEAP_BASE set by SetHeapSize
 // one uint32 per PLAT_PMEM_PAGE of the alias region, 0 = unmapped, else pool page + 1 (ALIAS_SIZE / PLAT_PMEM_PAGE words).
 extern bool g_pmem_reserved;
 void *kernel_pmem(uint64_t *size, const uint32_t **ptab);
+typedef void (*KernelPmemDrainFn)(void);
+typedef uint64_t (*KernelPmemSeqFn)(void);
+typedef void (*KernelPmemWaitFn)(uint64_t seq);
+void kernel_pmem_set_sync_hooks(KernelPmemDrainFn drain, KernelPmemSeqFn submitted, KernelPmemSeqFn completed, KernelPmemWaitFn wait);
 void kernel_set_system_resource_size(uint64_t size);  // [XC3] from main.npdm: GetInfo 16 (enables the SDK's VAMM)

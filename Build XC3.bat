@@ -69,7 +69,7 @@ echo.
 echo  Next: the launcher's "Install ^& build" tab precompiles the shaders ^(a few minutes, once^); PLAY also does it.
 echo  Optional: DLSS needs NVIDIA Streamline, not included ^(README, "Building", step 5^). FSR 3.1 / FSR 4 are included.
 choice /m " Start the launcher now"
-if not errorlevel 2 start "" "build\xenoblade3_launcher.exe"
+if not errorlevel 2 start "" "xenoblade3_launcher.exe"
 endlocal
 exit /b 0
 

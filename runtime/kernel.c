@@ -182,11 +182,25 @@ bool g_pmem_reserved;  // [XC3] (kernel.h)
 // rest in multiples of 64 KB) and goes back to the pool when none is left mapped.
 #define PMEM_BUDGET 0xCD500000ull  // the application's physical memory, shared with the heap (GetInfo 6)
 #define PMEM_PAGES (ALIAS_SIZE / PLAT_PMEM_PAGE)
+static pthread_mutex_t region_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t pmem_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t *pmem_view;
 static uint64_t pmem_size, pmem_next;  // pool bytes; pool pages handed out so far (then from pmem_free)
 static uint32_t *pmem_ptab, *pmem_free, pmem_nfree;
 static uint8_t *pmem_refs;             // 4 KB pages mapped in each 64 KB page of the alias region
+typedef struct { uint32_t pg; uint64_t seq; } PmemRetire;
+static PmemRetire *pmem_retire;        // [XC3] unmapped pool pages waiting for in-flight GPU work before reuse
+static uint32_t pmem_nretire, pmem_retire_cap;
+static KernelPmemDrainFn g_pmem_drain;
+static KernelPmemSeqFn g_pmem_submitted, g_pmem_completed;
+static KernelPmemWaitFn g_pmem_wait;
+
+void kernel_pmem_set_sync_hooks(KernelPmemDrainFn drain, KernelPmemSeqFn submitted, KernelPmemSeqFn completed, KernelPmemWaitFn wait) {
+    g_pmem_drain = drain;
+    g_pmem_submitted = submitted;
+    g_pmem_completed = completed;
+    g_pmem_wait = wait;
+}
 
 void *kernel_pmem(uint64_t *size, const uint32_t **ptab) {
     *size = pmem_size;
@@ -204,6 +218,8 @@ static bool pmem_init(void) {
     pmem_ptab = (uint32_t *)(uintptr_t)((t + 0xFFF) & ~0xFFFull);
     pmem_refs = calloc(PMEM_PAGES, 1);
     pmem_free = calloc(size / PLAT_PMEM_PAGE, 4);
+    pmem_retire_cap = (uint32_t)(size / PLAT_PMEM_PAGE);
+    pmem_retire = calloc(pmem_retire_cap, sizeof(PmemRetire));
     pmem_size = size;
     pmem_view = view;
     LOG("[kernel] physical memory pool: %llu MB (heap %llu MB)\n", (unsigned long long)(size >> 20), (unsigned long long)(heap_size >> 20));
@@ -215,11 +231,48 @@ static int pmem_free_desc(const void *a, const void *b) {
     return (x < y) - (x > y);
 }
 
+static void pmem_sort_free(void) {
+    if (!pmem_nfree) return;
+    qsort(pmem_free, pmem_nfree, sizeof pmem_free[0], pmem_free_desc);
+    while (pmem_nfree && pmem_free[0] == pmem_next - 1) {
+        pmem_next--;
+        memmove(pmem_free, pmem_free + 1, (--pmem_nfree) * sizeof pmem_free[0]);
+    }
+}
+
+static void pmem_reclaim(void) {
+    if (!pmem_nretire) return;
+    uint64_t done = g_pmem_completed ? g_pmem_completed() : ~0ull;
+    uint32_t keep = 0, added = 0;
+    for (uint32_t i = 0; i < pmem_nretire; i++) {
+        if (pmem_retire[i].seq <= done) {
+            pmem_free[pmem_nfree++] = pmem_retire[i].pg;
+            added++;
+        } else {
+            pmem_retire[keep++] = pmem_retire[i];
+        }
+    }
+    pmem_nretire = keep;
+    if (added) pmem_sort_free();
+}
+
 static uint32_t pmem_map(uint64_t addr, uint64_t size) {
     uint64_t lo = addr & ~(PLAT_PMEM_PAGE - 1), need = 0;
-    for (uint64_t a = lo; a < addr + size; a += PLAT_PMEM_PAGE) need += !pmem_ptab[(a - ALIAS_BASE) / PLAT_PMEM_PAGE];
     uint64_t pool_pages = pmem_size / PLAT_PMEM_PAGE;
-    if (need > pmem_nfree + (pool_pages - pmem_next)) return 0x10801;  // (the heap shrank since)
+    for (;;) {
+        pmem_reclaim();
+        need = 0;
+        for (uint64_t a = lo; a < addr + size; a += PLAT_PMEM_PAGE) need += !pmem_ptab[(a - ALIAS_BASE) / PLAT_PMEM_PAGE];
+        if (need <= pmem_nfree + (pool_pages - pmem_next)) break;
+        if (!pmem_nretire || !g_pmem_wait) return 0x10801;  // (the heap shrank since)
+        uint64_t wait_seq = 0;
+        for (uint32_t i = 0; i < pmem_nretire; i++)
+            if (pmem_retire[i].seq > wait_seq) wait_seq = pmem_retire[i].seq;
+        pthread_mutex_unlock(&pmem_lock);
+        g_pmem_wait(wait_seq);
+        pthread_mutex_lock(&pmem_lock);
+        if (g_pmem_completed && g_pmem_completed() < wait_seq) return 0x10801;
+    }
     // Prefer a contiguous ascending run of pool pages so GPU vertex/index fetches can read the pool directly (exec.c pmem_direct).
     bool free_contig = false;
     if (need > 1 && pmem_nfree >= need) {
@@ -242,7 +295,8 @@ static uint32_t pmem_map(uint64_t addr, uint64_t size) {
     return 0;
 }
 
-static void pmem_unmap(uint64_t addr, uint64_t size) {
+static void pmem_unmap(uint64_t addr, uint64_t size, uint64_t retire_seq) {
+    uint64_t done = (retire_seq && g_pmem_completed) ? g_pmem_completed() : retire_seq;
     uint32_t n0 = pmem_nfree;
     for (uint64_t a = addr & ~(PLAT_PMEM_PAGE - 1); a < addr + size; a += PLAT_PMEM_PAGE) {
         uint64_t g = (a - ALIAS_BASE) / PLAT_PMEM_PAGE;
@@ -251,17 +305,16 @@ static void pmem_unmap(uint64_t addr, uint64_t size) {
         uint8_t n = (uint8_t)((e - s + 0xFFF) >> 12);
         pmem_refs[g] = pmem_refs[g] > n ? pmem_refs[g] - n : 0;
         if (pmem_refs[g]) continue;
-        plat_pmem_unmap(a);
-        pmem_free[pmem_nfree++] = pmem_ptab[g] - 1;
+        uint32_t pg = pmem_ptab[g] - 1;
         pmem_ptab[g] = 0;
+        plat_pmem_unmap(a);
+        if (retire_seq && done < retire_seq && pmem_retire && pmem_nretire < pmem_retire_cap)
+            pmem_retire[pmem_nretire++] = (PmemRetire){pg, retire_seq};
+        else
+            pmem_free[pmem_nfree++] = pg;
     }
-    if (pmem_nfree > n0) {
-        qsort(pmem_free, pmem_nfree, sizeof pmem_free[0], pmem_free_desc);
-        while (pmem_nfree && pmem_free[0] == pmem_next - 1) {
-            pmem_next--;
-            memmove(pmem_free, pmem_free + 1, (--pmem_nfree) * sizeof pmem_free[0]);
-        }
-    }
+    if (pmem_nfree > n0) pmem_sort_free();
+    pmem_reclaim();
 }
 
 static bool pmem_covers(uint64_t addr, uint64_t size) {
@@ -270,36 +323,43 @@ static bool pmem_covers(uint64_t addr, uint64_t size) {
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
     int n = 0;
+    pthread_mutex_lock(&region_lock);
     for (int i = 0; i < nregions && n < max; i++)
         if ((regions[i].perm & 2) && regions[i].type != 0xB && regions[i].type != 0xC) {
             addr[n] = regions[i].addr; size[n] = regions[i].size; n++;
         }
+    pthread_mutex_unlock(&region_lock);
     return n;
 }
 
 static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
-    if (nregions == MAX_REGIONS) FATAL("too many regions\n");
+    if (!(type == 0x7 && g_pmem_reserved)) plat_commit(addr, size);  // back it before the OS writes there (Windows: file reads into the heap)
+    pthread_mutex_lock(&region_lock);
+    if (nregions == MAX_REGIONS) { pthread_mutex_unlock(&region_lock); FATAL("too many regions\n"); }
     if (nregions + 1 == 1024 || nregions + 1 == 4096 || nregions + 1 == 12000)  // (long-session growth shows in the log)
         LOG("[kernel] %d memory regions\n", nregions + 1);
-    if (!(type == 0x7 && g_pmem_reserved)) plat_commit(addr, size);  // back it before the OS writes there (Windows: file reads into the heap)
     int i = nregions++;
     while (i > 0 && regions[i - 1].addr > addr) { regions[i] = regions[i - 1]; i--; }
     regions[i] = (Region){addr, size, type, perm};
+    pthread_mutex_unlock(&region_lock);
 }
 
 static void region_remove(uint64_t addr) {
+    pthread_mutex_lock(&region_lock);
     for (int i = 0; i < nregions; i++) {
         if (regions[i].addr == addr) {
             memmove(&regions[i], &regions[i + 1], (nregions - i - 1) * sizeof(Region));
             nregions--;
-            return;
+            break;
         }
     }
+    pthread_mutex_unlock(&region_lock);
 }
 
 static void query_memory(uint64_t addr, uint64_t out) {
     uint64_t prev_end = 0;
     uint64_t info[5] = {0};  // addr, size, type|attr<<32, perm|ipc<<32, device|pad<<32
+    pthread_mutex_lock(&region_lock);
     for (int i = 0; i < nregions; i++) {
         Region *r = &regions[i];
         if (addr >= r->addr && addr < r->addr + r->size) {
@@ -307,17 +367,20 @@ static void query_memory(uint64_t addr, uint64_t out) {
             info[1] = r->size;
             info[2] = r->type;
             info[3] = r->perm;
+            pthread_mutex_unlock(&region_lock);
             memcpy((void *)out, info, 0x28);
             return;
         }
         if (addr < r->addr) {
             info[0] = prev_end;
             info[1] = r->addr - prev_end;
+            pthread_mutex_unlock(&region_lock);
             memcpy((void *)out, info, 0x28);
             return;
         }
         prev_end = r->addr + r->size;
     }
+    pthread_mutex_unlock(&region_lock);
     info[0] = prev_end;
     info[1] = (1ull << 39) - prev_end;
     memcpy((void *)out, info, 0x28);
@@ -1071,7 +1134,11 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 4: v = HEAP_BASE; break;
         case 5: v = HEAP_MAX; break;
         case 6: case 21: v = 0xCD500000ull; break;  // application memory (3.2 GB, as on hardware)
-        case 7: case 22: v = heap_size + phys_mapped + 0x4000000; break;
+        case 7: case 22:
+            pthread_mutex_lock(&region_lock);
+            v = heap_size + phys_mapped + 0x4000000;
+            pthread_mutex_unlock(&region_lock);
+            break;
         case 8: v = 0; break;
         case 9: v = 0; break;
         case 11: v = diag_random64(); break;
@@ -1089,29 +1156,49 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[1] = v;
         break;
     }
-    case 0x2C:  // MapPhysicalMemory(addr, size)
+    case 0x2C: {  // MapPhysicalMemory(addr, size)
         // [XC3] within the application's physical memory (GetInfo 6, shared with the heap): XC3 maps 1 MB pages into
         // its 60 GB address region until this fails, and with no limit it committed 16 GB and filled the region table.
         // 0x10801 = kernel LimitReached (the SDK's VammManager turns it into a plain allocation failure).
-        if (heap_size + phys_mapped + x[1] > 0xCD500000ull) { x[0] = 0x10801; break; }
+        pthread_mutex_lock(&region_lock);
+        bool over = heap_size + phys_mapped + x[1] > 0xCD500000ull;
+        if (!over) phys_mapped += x[1];
+        pthread_mutex_unlock(&region_lock);
+        if (over) { x[0] = 0x10801; break; }
         if (pmem_covers(x[0], x[1])) {  // [XC3] pages of the physical memory pool (the GPU sees them: exec.c pmem)
             pthread_mutex_lock(&pmem_lock);
             uint32_t r = pmem_init() ? pmem_map(x[0], x[1]) : 0x10801;
             pthread_mutex_unlock(&pmem_lock);
-            if (r) { x[0] = r; break; }
+            if (r) {
+                pthread_mutex_lock(&region_lock);
+                phys_mapped -= x[1];
+                pthread_mutex_unlock(&region_lock);
+                x[0] = r;
+                break;
+            }
         }
         region_add(x[0], x[1], 0x7, 3);  // [XC3] (commits the range: before the memset, not after)
         memset((void *)x[0], 0, x[1]);
-        phys_mapped += x[1];
         x[0] = R_OK;
         break;
+    }
     case 0x2D:  // UnmapPhysicalMemory
+        pthread_mutex_lock(&region_lock);
         for (int i = 0; i < nregions; i++)  // [XC3] give the pages back to the budget (exact mappings only)
-            if (regions[i].addr == x[0] && regions[i].type == 0x7) { phys_mapped -= regions[i].size; break; }
-        region_remove(x[0]);
+            if (regions[i].addr == x[0] && regions[i].type == 0x7) {
+                phys_mapped -= regions[i].size;
+                memmove(&regions[i], &regions[i + 1], (nregions - i - 1) * sizeof(Region));
+                nregions--;
+                break;
+            }
+        pthread_mutex_unlock(&region_lock);
         if (pmem_covers(x[0], x[1]) && pmem_view) {  // [XC3]
+            // Drain queued async render-worker jobs before unmapping the guest VA, and tag freed pool pages with
+            // the last submitted GPU sequence so in-flight GPU STG/XFB shaders cannot overwrite a reused page.
+            if (g_pmem_drain) g_pmem_drain();
+            uint64_t retire_seq = g_pmem_submitted ? g_pmem_submitted() : 0;
             pthread_mutex_lock(&pmem_lock);
-            pmem_unmap(x[0], x[1]);
+            pmem_unmap(x[0], x[1], retire_seq);
             pthread_mutex_unlock(&pmem_lock);
         }
         x[0] = R_OK;
@@ -1177,7 +1264,10 @@ void kernel_reset(void) {
     g_waitlist = NULL;
     g_syncwaiters = NULL;
     memset(handles, 0, sizeof handles);
+    pthread_mutex_lock(&region_lock);
     nregions = 0;
+    phys_mapped = 0;
+    pthread_mutex_unlock(&region_lock);
     heap_size = 0;
     tls_next = TLS_BASE;
     next_thread_id = 0x50;

@@ -1,6 +1,6 @@
 name: release
 # [XC3] A pushed tag v* -> a GitHub Release with XC3Recomp-<tag>.zip: the repository at that tag plus a prebuilt
-# build/xenoblade3_launcher.exe, so a new user extracts it, starts the launcher and does the whole first-time setup
+# xenoblade3_launcher.exe, so a new user extracts it, starts the launcher and does the whole first-time setup
 # from its "Install & build" tab (no .bat, no Git). No game files, no generated code: package_guard.py checks the zip's
 # contents before the upload.
 on:
@@ -42,8 +42,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           git archive --format=tar --prefix="$name/" HEAD -o dist/src.tar
           tar -xf dist/src.tar -C dist; Remove-Item dist/src.tar
-          New-Item -ItemType Directory -Force "dist/$name/build" | Out-Null
-          Copy-Item build/xenoblade3_launcher.exe "dist/$name/build/"
+          Copy-Item xenoblade3_launcher.exe "dist/$name/"
           python -X utf8 tools/package_guard.py "dist/$name"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Push-Location dist; python -m zipfile -c "$name.zip" "$name"; Pop-Location

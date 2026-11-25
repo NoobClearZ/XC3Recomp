@@ -19,6 +19,14 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 #endif
 
 // ------------------------------------------------------------------ settings (same keys as settings_ini.c)
@@ -78,12 +86,24 @@ static int key_from_ini(const char *v) {
 
 #define APP_NAME "Xenoblade Chronicles 3"  // [XC3] (window title, ini header, the big title)
 #define INI_FILE "xc3.ini"
+#ifdef _WIN32
 #define GAME_EXE "build/xc3.exe"
+#define GAME_EXE_ALT "build/xcde.exe"
+#define LAUNCHER_EXE "xenoblade3_launcher.exe"
+#define VENV_PY ".venv/Scripts/python.exe"
+#else
+#define GAME_EXE "build/xc3"
+#define GAME_EXE_ALT "build/xcde"
+#define LAUNCHER_EXE "xenoblade3_launcher"
+#define VENV_PY ".venv/bin/python"
+#endif
 #define DEF_WIN 2             // [XC3] 1920x1080: the size XC3 draws its gameplay frame at (its window crop)
 
 struct Cfg {
     bool fullscreen = false;
     int win = DEF_WIN;      // index into k_wins
+    int aspect = 0;         // [XC3] 0 = 16:9, 1 = auto, 2 = 21:9, 3 = 32:9
+    bool ui_fit = true;     // [XC3] keep 16:9 HUD proportions + edge shift on ultrawide
     int res = 0;            // index into k_res
     int upscaler = 1;       // 0 bilinear, 1 FSR 1, 2 FSR 3.1, 3 DLSS, 4 FSR 4 ([XC3])
     int uquality = 3;       // FSR 3 / DLSS: 0 native AA, 1 quality, 2 balanced, 3 performance, 4 ultra performance
@@ -136,7 +156,9 @@ static int icons_effective(int sel) {
 }
 static const char *const k_ups_ini[] = {"bilinear", "fsr", "fsr3", "dlss", "fsr4"};
 static const char *const k_uq_ini[] = {"native", "quality", "balanced", "performance", "ultra"};
-static const char *const k_wins[] = {"1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160"};
+static const char *const k_wins[] = {"1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160",
+                                     "2560x1080", "3440x1440", "3840x1600", "5120x1440"};
+static const char *const k_aspect_ini[] = {"16:9", "auto", "21:9", "32:9"};
 static const char *const k_res_ini[] = {"match", "1", "2", "3", "75%", "50%", "dynamic"};
 // [XC3] N x the frame the game draws: 1920x1080 in gameplay (Switch docked), 1280x720 on the title screen and in movies
 static const char *const k_res_ui[] = {"Match window (recommended)", "1x - 1080p (like Switch on TV)", "2x - 2160p (4K)",
@@ -451,7 +473,9 @@ static void load() {
         for (char *e = v + strlen(v); e > v && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n'); ) *--e = 0;
         int i;
         if (!strcmp(k, "fullscreen")) g.fullscreen = atoi(v) != 0;
-        else if (!strcmp(k, "window") && (i = find(k_wins, 5, v)) >= 0) g.win = i;
+        else if (!strcmp(k, "window") && (i = find(k_wins, 9, v)) >= 0) g.win = i;
+        else if (!strcmp(k, "aspect") && (i = find(k_aspect_ini, 4, v)) >= 0) g.aspect = i;
+        else if (!strcmp(k, "ui_fit")) g.ui_fit = atoi(v) != 0;
         else if (!strcmp(k, "resolution") && (i = find(k_res_ini, 7, v)) >= 0) g.res = i;
         else if (!strcmp(k, "upscaler")) g.upscaler = !strcmp(v, "fsr") ? 1 : !strcmp(v, "fsr3") ? 2 : !strcmp(v, "dlss") ? 3 : !strcmp(v, "fsr4") ? 4 : 0;
         else if (!strcmp(k, "upscale_quality") && (i = find(k_uq_ini, 5, v)) >= 0) g.uquality = i;
@@ -516,8 +540,9 @@ static bool save() {
     FILE *f = fopen(path(INI_FILE).c_str(), "w");
     if (!f) return false;
     fprintf(f, "# " APP_NAME " settings (written by the launcher)\n");
-    fprintf(f, "fullscreen = %d\nwindow = %s\nresolution = %s\nupscaler = %s\nantialias = %s\nshow_fps = %d\n", g.fullscreen,
-            k_wins[g.win], k_res_ini[g.res], k_ups_ini[g.upscaler], g.smaa ? "smaa" : "off", g.show_fps);
+    fprintf(f, "fullscreen = %d\nwindow = %s\naspect = %s\nui_fit = %d\nresolution = %s\nupscaler = %s\nantialias = %s\nshow_fps = %d\n",
+            g.fullscreen, k_wins[g.win], k_aspect_ini[std::clamp(g.aspect, 0, 3)], g.ui_fit,
+            k_res_ini[g.res], k_ups_ini[g.upscaler], g.smaa ? "smaa" : "off", g.show_fps);
     g.frame_gen = g.cut_fg = false;  // [XC3] not offered (see the upscaler options)
     g.frame_lag = (g.fps != 0);      // [XC3] frame lag above 30 fps
     fprintf(f, "upscale_quality = %s\nframe_gen = %d\n", k_uq_ini[g.uquality], g.frame_gen);
@@ -557,14 +582,159 @@ static bool exists(const char *rel) {
 
 static std::string get_game_exe_path() {
     if (exists(GAME_EXE)) return path(GAME_EXE);
-    if (exists("build/xc3.exe")) return path("build/xc3.exe");
-    if (exists("build/xcde.exe")) return path("build/xcde.exe");
+    if (exists(GAME_EXE_ALT)) return path(GAME_EXE_ALT);
     return path(GAME_EXE);
 }
 
 static bool have_game_exe() {
-    return exists(GAME_EXE) || exists("build/xc3.exe") || exists("build/xcde.exe");
+    return exists(GAME_EXE) || exists(GAME_EXE_ALT);
 }
+
+static bool l_is_dir(const std::string &abs) {
+    SDL_PathInfo pi;
+    return SDL_GetPathInfo(abs.c_str(), &pi) && pi.type == SDL_PATHTYPE_DIRECTORY;
+}
+static bool l_file_ok(const std::string &abs) {
+    SDL_PathInfo pi;
+    return SDL_GetPathInfo(abs.c_str(), &pi);
+}
+static long long l_mtime(const std::string &abs) {
+    struct stat st;
+    return stat(abs.c_str(), &st) == 0 ? (long long)st.st_mtime : 0;
+}
+static void l_mkdir(const std::string &abs) {
+#ifdef _WIN32
+    CreateDirectoryA(abs.c_str(), NULL);
+#else
+    mkdir(abs.c_str(), 0755);
+#endif
+}
+static void l_set_env(const char *k, const char *v) {
+#ifdef _WIN32
+    SetEnvironmentVariableA(k, v);
+#else
+    setenv(k, v, 1);
+#endif
+}
+static bool l_self_path(char *buf, size_t n) {
+#ifdef _WIN32
+    DWORD r = GetModuleFileNameA(NULL, buf, (DWORD)n);
+    return r > 0 && r < n;
+#else
+    ssize_t r = readlink("/proc/self/exe", buf, n - 1);
+    if (r <= 0) return false;
+    buf[r] = 0;
+    return true;
+#endif
+}
+static void l_open_path(const std::string &abs) {
+#ifdef _WIN32
+    ShellExecuteA(NULL, "open", abs.c_str(), NULL, NULL, SW_SHOWNORMAL);
+#else
+    pid_t pid = fork();
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) { dup2(devnull, 0); dup2(devnull, 1); dup2(devnull, 2); close(devnull); }
+        execlp("xdg-open", "xdg-open", abs.c_str(), (char *)NULL);
+        _exit(127);
+    }
+#endif
+}
+
+#ifdef _WIN32
+typedef HANDLE LProc;
+#define LPROC_NULL NULL
+static std::string l_win_quote(const std::vector<std::string> &argv) {
+    std::string cmd;
+    for (size_t i = 0; i < argv.size(); i++) {
+        if (i) cmd += ' ';
+        cmd += '"';
+        cmd += argv[i];
+        cmd += '"';
+    }
+    return cmd;
+}
+static LProc l_spawn(const std::vector<std::string> &argv, const char *log_rel, HANDLE job, bool low_prio, int *err_out = nullptr) {
+    STARTUPINFOA si = {};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi = {};
+    HANDLE h = INVALID_HANDLE_VALUE;
+    if (log_rel) {
+        SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
+        h = CreateFileA(path(log_rel).c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdOutput = si.hStdError = h;
+            si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        }
+    }
+    std::string cmd = l_win_quote(argv);
+    std::vector<char> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+    DWORD flags = CREATE_NO_WINDOW | (job ? CREATE_SUSPENDED : 0) | (low_prio ? BELOW_NORMAL_PRIORITY_CLASS : 0);
+    BOOL ok = CreateProcessA(argv[0].c_str(), buf.data(), NULL, NULL, TRUE, flags, NULL, g_root.c_str(), &si, &pi);
+    if (err_out) *err_out = ok ? 0 : (int)GetLastError();
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    if (!ok) return NULL;
+    if (job) { AssignProcessToJobObject(job, pi.hProcess); ResumeThread(pi.hThread); }
+    CloseHandle(pi.hThread);
+    return pi.hProcess;
+}
+static bool l_poll(LProc &p, int *code) {
+    if (!p) return false;
+    if (WaitForSingleObject(p, 0) != WAIT_OBJECT_0) return false;
+    DWORD c = 1;
+    GetExitCodeProcess(p, &c);
+    CloseHandle(p);
+    p = NULL;
+    if (code) *code = (int)c;
+    return true;
+}
+static void l_kill(LProc &p, HANDLE job) {
+    if (!p) return;
+    if (job) TerminateJobObject(job, 1);
+    else TerminateProcess(p, 1);
+    WaitForSingleObject(p, 2000);
+    CloseHandle(p);
+    p = NULL;
+}
+#else
+typedef pid_t LProc;
+#define LPROC_NULL 0
+static LProc l_spawn(const std::vector<std::string> &argv, const char *log_rel, bool new_group, bool low_prio, int *err_out = nullptr) {
+    pid_t pid = fork();
+    if (pid < 0) { if (err_out) *err_out = errno; return 0; }
+    if (pid == 0) {
+        if (chdir(g_root.c_str()) != 0) _exit(127);
+        if (new_group) setpgid(0, 0);
+        if (low_prio) (void)nice(10);
+        int fd = open(log_rel ? path(log_rel).c_str() : "/dev/null", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) { dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); if (fd > 2) close(fd); }
+        std::vector<char *> cargv;
+        for (const auto &s : argv) cargv.push_back(const_cast<char *>(s.c_str()));
+        cargv.push_back(nullptr);
+        execvp(cargv[0], cargv.data());
+        _exit(127);
+    }
+    if (err_out) *err_out = 0;
+    return pid;
+}
+static bool l_poll(LProc &p, int *code) {
+    if (p <= 0) return false;
+    int st = 0;
+    pid_t r = waitpid(p, &st, WNOHANG);
+    if (r == 0) return false;
+    p = 0;
+    if (code) *code = (r > 0 && WIFEXITED(st)) ? WEXITSTATUS(st) : 1;
+    return true;
+}
+static void l_kill(LProc &p, bool group) {
+    if (p <= 0) return;
+    kill(group ? -p : p, SIGKILL);
+    waitpid(p, NULL, 0);
+    p = 0;
+}
+#endif
 
 static std::string g_status;
 static bool g_launched_ok;  // (launch() started the game: the launcher closes)
@@ -676,65 +846,58 @@ static bool play_button(const char *label, ImVec2 size) {
 
 static void launch() {
     if (!save()) { g_status = T("No se pudo escribir " INI_FILE); return; }
-#ifdef _WIN32
     std::string exe = get_game_exe_path();
-    std::string cmd = "\"" + exe + "\" targets";
-    // the game's DLLs (SDL3, Vulkan loader, FFmpeg, opus) come from MSYS2
+#ifdef _WIN32
     const char *old = getenv("PATH");
     std::string p = std::string("C:\\msys64\\ucrt64\\bin;") + (old ? old : "");
     SetEnvironmentVariableA("PATH", p.c_str());
-    STARTUPINFOA si = {};
-    si.cb = sizeof si;
-    PROCESS_INFORMATION pi = {};
-    std::string log = path("build/last_game.log"), rec_dir;
+#endif
+    std::string log_rel = "build/last_game.log", rec_dir;
     if (g.record) {  // [XC3] as scripts/play.sh: play/<date_time>/ with screenshots every 5 s, input.txt and game.log
         char stamp[32];
-        SYSTEMTIME t;
-        GetLocalTime(&t);
-        snprintf(stamp, sizeof stamp, "%04d%02d%02d_%02d%02d%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        time_t now = time(NULL);
+        struct tm tm_now;
+#ifdef _WIN32
+        localtime_s(&tm_now, &now);
+#else
+        localtime_r(&now, &tm_now);
+#endif
+        strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", &tm_now);
         rec_dir = std::string("play/") + stamp;
-        CreateDirectoryA(path("play").c_str(), NULL);
-        CreateDirectoryA(path(rec_dir.c_str()).c_str(), NULL);
-        log = path((rec_dir + "/game.log").c_str());
-        SetEnvironmentVariableA("XC3_SHOT_EVERY", ("150:" + rec_dir).c_str());
-        SetEnvironmentVariableA("XC3_INPUT_RECORD", (rec_dir + "/input.txt").c_str());
-        SetEnvironmentVariableA("XC3_STALL", "5");
-        SetEnvironmentVariableA("XCDE_SHOT_EVERY", ("150:" + rec_dir).c_str());
-        SetEnvironmentVariableA("XCDE_INPUT_RECORD", (rec_dir + "/input.txt").c_str());
-        SetEnvironmentVariableA("XCDE_STALL", "5");
+        l_mkdir(path("play"));
+        l_mkdir(path(rec_dir.c_str()));
+        log_rel = rec_dir + "/game.log";
+        l_set_env("XC3_SHOT_EVERY", ("150:" + rec_dir).c_str());
+        l_set_env("XC3_INPUT_RECORD", (rec_dir + "/input.txt").c_str());
+        l_set_env("XC3_STALL", "5");
+        l_set_env("XCDE_SHOT_EVERY", ("150:" + rec_dir).c_str());
+        l_set_env("XCDE_INPUT_RECORD", (rec_dir + "/input.txt").c_str());
+        l_set_env("XCDE_STALL", "5");
     }
-    SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
-    HANDLE h = CreateFileA(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h != INVALID_HANDLE_VALUE) {
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdOutput = si.hStdError = h;
-        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    }
-    std::vector<char> buf(cmd.begin(), cmd.end());
-    buf.push_back(0);
-    BOOL ok = CreateProcessA(exe.c_str(), buf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, g_root.c_str(), &si, &pi);
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    if (!ok) { g_status = std::string(T("No se pudo iniciar build/xc3.exe (error ")) + std::to_string(GetLastError()) + ")"; return; }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    int err = 0;
+#ifdef _WIN32
+    LProc proc = l_spawn({exe, "targets"}, log_rel.c_str(), NULL, false, &err);
+    if (proc) CloseHandle(proc);
+#else
+    // Detached child for game launch: don't reap synchronously; parent exits when launched.
+    LProc proc = l_spawn({exe, "targets"}, log_rel.c_str(), false, false, &err);
+#endif
+    if (!proc) { g_status = std::string(T("No se pudo iniciar build/xc3.exe (error ")) + std::to_string(err) + ")"; return; }
     g_status = rec_dir.empty() ? std::string(T("Juego iniciado. Registro: build/last_game.log")) : std::string(T("Juego iniciado. Grabando en ")) + rec_dir;
     g_launched_ok = true;
-#endif
 }
 
 // ------------------------------------------------------------------ shader precompilation (T187)
-// "Precompilar shaders" runs `build/xcde.exe --precompile targets` (runtime/nvn/vulkan/precompile.c): it translates every
+// "Precompilar shaders" runs `<exe> --precompile targets` (runtime/nvn/vulkan/precompile.c): it translates every
 // shader in the game's files into cache/spirv, so the first visit to an area doesn't stop to compile. It reports
 // progress in cache/precompile_progress.txt and writes cache/precompile_done.txt at the end. JUGAR runs it first
 // when it was never done (once, a few minutes; "Omitir" skips it).
-#ifdef _WIN32
-static HANDLE g_pc_proc;
-#endif
+static LProc g_pc_proc = LPROC_NULL;
 static bool g_pc_then_play, g_pc_play_now;
 static float g_pc_frac;
 static std::string g_pc_text;
 
-// [XCDE] T211: done for THIS build - precompile_done.txt names the build/xcde.exe (size, time) it was made with; a new
+// [XCDE] T211: done for THIS build - precompile_done.txt names the game exe (size, time) it was made with; a new
 // build translates shaders differently, so JUGAR precompiles again (unchanged shaders are cache hits: quick)
 static bool pc_done() {
     FILE *f = fopen(path("cache/precompile_done.txt").c_str(), "r");
@@ -747,64 +910,43 @@ static bool pc_done() {
     if (stat(get_game_exe_path().c_str(), &es) != 0) return true;
     return sz == (long long)es.st_size && mt == (long long)es.st_mtime;
 }
-static bool pc_running() {
-#ifdef _WIN32
-    return g_pc_proc != NULL;
-#else
-    return false;
-#endif
-}
+static bool pc_running() { return g_pc_proc != LPROC_NULL; }
 
 static void pc_start(bool then_play) {
-#ifdef _WIN32
-    if (g_pc_proc) return;
+    if (pc_running()) return;
     std::string exe = get_game_exe_path();
-    std::string cmd = "\"" + exe + "\" --precompile targets";
+#ifdef _WIN32
     const char *old = getenv("PATH");
     std::string p = std::string("C:\\msys64\\ucrt64\\bin;") + (old ? old : "");
     SetEnvironmentVariableA("PATH", p.c_str());
-    CreateDirectoryA(path("cache").c_str(), NULL);
-    DeleteFileA(path("cache/precompile_progress.txt").c_str());
-    STARTUPINFOA si = {};
-    si.cb = sizeof si;
-    PROCESS_INFORMATION pi = {};
-    std::string log = path("build/last_precompile.log");
-    SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
-    HANDLE h = CreateFileA(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h != INVALID_HANDLE_VALUE) {
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdOutput = si.hStdError = h;
-        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    }
-    std::vector<char> buf(cmd.begin(), cmd.end());
-    buf.push_back(0);
-    BOOL ok = CreateProcessA(exe.c_str(), buf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, NULL,
-                             g_root.c_str(), &si, &pi);
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    if (!ok) { g_status = std::string(T("No se pudo iniciar la precompilación (error ")) + std::to_string(GetLastError()) + ")"; return; }
-    CloseHandle(pi.hThread);
-    g_pc_proc = pi.hProcess;
+#endif
+    l_mkdir(path("cache"));
+    remove(path("cache/precompile_progress.txt").c_str());
+    int err = 0;
+#ifdef _WIN32
+    g_pc_proc = l_spawn({exe, "--precompile", "targets"}, "build/last_precompile.log", NULL, true, &err);
+#else
+    g_pc_proc = l_spawn({exe, "--precompile", "targets"}, "build/last_precompile.log", false, true, &err);
+#endif
+    if (!g_pc_proc) { g_status = std::string(T("No se pudo iniciar la precompilación (error ")) + std::to_string(err) + ")"; return; }
     g_pc_then_play = then_play;
     g_pc_frac = 0;
     g_pc_text = T("Buscando shaders en los archivos del juego...");
     g_status = then_play ? T("Preparando shaders antes de la primera partida (solo esta vez)") : T("Precompilando shaders");
-#endif
 }
 
 static void pc_stop() {
+    if (!pc_running()) return;
 #ifdef _WIN32
-    if (!g_pc_proc) return;
-    TerminateProcess(g_pc_proc, 1);
-    WaitForSingleObject(g_pc_proc, 2000);
-    CloseHandle(g_pc_proc);
-    g_pc_proc = NULL;
+    l_kill(g_pc_proc, NULL);
+#else
+    l_kill(g_pc_proc, false);
 #endif
 }
 
 // (every frame while it runs) progress from the file; at the end, the result and JUGAR if it was waiting
 static void pc_poll() {
-#ifdef _WIN32
-    if (!g_pc_proc) return;
+    if (!pc_running()) return;
     static Uint64 last;
     Uint64 now = SDL_GetTicks();
     if (now - last < 200) return;
@@ -824,16 +966,12 @@ static void pc_poll() {
         }
         fclose(f);
     }
-    if (WaitForSingleObject(g_pc_proc, 0) != WAIT_OBJECT_0) return;
-    DWORD code = 1;
-    GetExitCodeProcess(g_pc_proc, &code);
-    CloseHandle(g_pc_proc);
-    g_pc_proc = NULL;
+    int code = 1;
+    if (!l_poll(g_pc_proc, &code)) return;
     // [XCDE] T240: a run that died while the driver was building (cache/precompile_inflight.bin left behind) starts
     // again by itself - the new run skips what was being built (precompile.c crash-safe) - up to 3 times
     static int retries;
-    DWORD att = GetFileAttributesA(path("cache/precompile_inflight.bin").c_str());
-    if (!(code == 0 && pc_done()) && att != INVALID_FILE_ATTRIBUTES && retries < 3) {
+    if (!(code == 0 && pc_done()) && l_file_ok(path("cache/precompile_inflight.bin")) && retries < 3) {
         retries++;
         bool then_play = g_pc_then_play;
         pc_start(then_play);
@@ -843,7 +981,6 @@ static void pc_poll() {
     retries = 0;
     g_status = code == 0 && pc_done() ? T("Shaders precompilados") : T("La precompilación falló (registro: build/last_precompile.log)");
     if (g_pc_then_play) g_pc_play_now = true;
-#endif
 }
 
 // ------------------------------------------------------------------ install & build ([XC3] tab "Instalación y build")
@@ -855,32 +992,47 @@ static void pc_poll() {
 // (tools/launcher/build.sh), so it starts before any tool is installed. The tools install and the build run in a job
 // object: Stop and closing the launcher end them with everything they started. The launcher's own exe is swapped by
 // tools/launcher/build.sh (renamed, not overwritten): the new one runs from the next start.
-static HANDLE g_bd_proc, g_bd_job, g_gf_proc, g_gf_pick, g_dlc_pick, g_tl_proc;
+static LProc g_bd_proc = LPROC_NULL, g_gf_proc = LPROC_NULL, g_gf_pick = LPROC_NULL, g_dlc_pick = LPROC_NULL, g_tl_proc = LPROC_NULL;
+#ifdef _WIN32
+static HANDLE g_bd_job;
+#endif
 static int g_bd_step, g_tl_step, g_gf_code = -2;  // (game files: -2 not checked, -1 checking, else check_dump.py's exit code)
 static std::string g_bd_line, g_tl_line;
 static bool g_bd_new_launcher;
-static FILETIME g_self_time;
+static long long g_self_mtime;
+static int g_linux_libs_ok = -1;
 
-// [XC3] MSYS2's bash first (setup_windows.ps1 installs it: no Git for Windows needed), then Git Bash
+// [XC3] MSYS2's bash first on Windows; standard bash on Linux
 static std::string bd_bash() {
+#ifdef _WIN32
     std::string c[3] = {"C:\\msys64\\usr\\bin\\bash.exe"};
     if (const char *p = getenv("ProgramFiles")) c[1] = std::string(p) + "\\Git\\bin\\bash.exe";
     if (const char *p = getenv("LOCALAPPDATA")) c[2] = std::string(p) + "\\Programs\\Git\\bin\\bash.exe";
-    for (auto &s : c) if (!s.empty() && GetFileAttributesA(s.c_str()) != INVALID_FILE_ATTRIBUTES) return s;
+    for (auto &s : c) if (!s.empty() && l_file_ok(s)) return s;
     return "";
+#else
+    if (l_file_ok("/bin/bash")) return "/bin/bash";
+    if (l_file_ok("/usr/bin/bash")) return "/usr/bin/bash";
+    return "bash";
+#endif
 }
-static bool file_ok(const char *p) { return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES; }
-static bool tl_msys_ok() {  // (the libraries Build XC3.bat checks for)
-    return file_ok("C:\\msys64\\ucrt64\\lib\\libSDL3.dll.a") && file_ok("C:\\msys64\\ucrt64\\lib\\libshaderc_shared.dll.a");
+static bool tl_msys_ok() {
+#ifdef _WIN32
+    return l_file_ok("C:\\msys64\\ucrt64\\lib\\libSDL3.dll.a") && l_file_ok("C:\\msys64\\ucrt64\\lib\\libshaderc_shared.dll.a");
+#else
+    if (g_linux_libs_ok < 0) {
+        g_linux_libs_ok = (system("pkg-config --exists sdl3 vulkan shaderc opus libavcodec libzstd >/dev/null 2>&1") == 0) ? 1 : 0;
+    }
+    return g_linux_libs_ok == 1;
+#endif
 }
-static bool bd_tools_ok() { return !bd_bash().empty() && exists(".venv/Scripts/python.exe") && tl_msys_ok(); }
-static bool tl_running() { return g_tl_proc != NULL; }
-static bool bd_running() { return g_bd_proc != NULL; }
-static bool gf_busy() { return g_gf_proc != NULL || g_gf_pick != NULL || g_dlc_pick != NULL; }
+static bool bd_tools_ok() { return !bd_bash().empty() && exists(VENV_PY) && tl_msys_ok(); }
+static bool tl_running() { return g_tl_proc != LPROC_NULL; }
+static bool bd_running() { return g_bd_proc != LPROC_NULL; }
+static bool gf_busy() { return g_gf_proc != LPROC_NULL || g_gf_pick != LPROC_NULL || g_dlc_pick != LPROC_NULL; }
 
-// a hidden process in the repository root, its output in <log> (msys64 on the PATH, as Build XC3.bat; [XC3] its
-// usr\bin too, once: MSYS2's bash started directly, not as a login shell, finds sed / cp / mkdir there)
-static HANDLE bd_spawn(const std::string &exe, const std::string &args, const char *log, HANDLE job) {
+static LProc bd_spawn_argv(const std::vector<std::string> &argv, const char *log_rel, bool use_job, int *err_out = nullptr) {
+#ifdef _WIN32
     char cur[32768];
     DWORD n = GetEnvironmentVariableA("PATH", cur, sizeof cur);
     std::string p = n && n < sizeof cur ? cur : "";
@@ -888,50 +1040,51 @@ static HANDLE bd_spawn(const std::string &exe, const std::string &args, const ch
         for (size_t at; (at = p.find(d)) != std::string::npos;) p.erase(at, strlen(d));
     p = "C:\\msys64\\ucrt64\\bin;C:\\msys64\\usr\\bin;" + p;  // (ucrt64 first: the game's DLLs)
     SetEnvironmentVariableA("PATH", p.c_str());
-    CreateDirectoryA(path("build").c_str(), NULL);
-    STARTUPINFOA si = {};
-    si.cb = sizeof si;
-    PROCESS_INFORMATION pi = {};
-    SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
-    HANDLE h = CreateFileA(path(log).c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h != INVALID_HANDLE_VALUE) {
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdOutput = si.hStdError = h;
-        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    l_mkdir(path("build"));
+    if (use_job && !g_bd_job) {
+        g_bd_job = CreateJobObjectA(NULL, NULL);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {};
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (g_bd_job) SetInformationJobObject(g_bd_job, JobObjectExtendedLimitInformation, &li, sizeof li);
     }
-    std::string cmd = "\"" + exe + "\" " + args;
-    std::vector<char> buf(cmd.begin(), cmd.end());
-    buf.push_back(0);
-    BOOL ok = CreateProcessA(exe.c_str(), buf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW | (job ? CREATE_SUSPENDED : 0), NULL,
-                             g_root.c_str(), &si, &pi);
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    if (!ok) return NULL;
-    if (job) { AssignProcessToJobObject(job, pi.hProcess); ResumeThread(pi.hThread); }
-    CloseHandle(pi.hThread);
-    return pi.hProcess;
+    return l_spawn(argv, log_rel, use_job ? g_bd_job : NULL, false, err_out);
+#else
+    l_mkdir(path("build"));
+    return l_spawn(argv, log_rel, use_job, false, err_out);
+#endif
 }
 
 static void gf_check() {
-    if (gf_busy() || !exists(".venv/Scripts/python.exe")) return;
-    g_gf_proc = bd_spawn(path(".venv/Scripts/python.exe"), "-X utf8 tools\\extract\\check_dump.py targets", "build/check_dump.log", NULL);
+    if (gf_busy() || !exists(VENV_PY)) return;
+    g_gf_proc = bd_spawn_argv({path(VENV_PY), "-X", "utf8", "tools/extract/check_dump.py", "targets"}, "build/check_dump.log", false);
     g_gf_code = g_gf_proc ? -1 : -2;
 }
 static void gf_pick() {
     if (gf_busy() || bd_running()) return;
+    int err = 0;
+#ifdef _WIN32
     char sys[MAX_PATH] = "";
     GetSystemDirectoryA(sys, sizeof sys);
     std::string ps = std::string(sys) + "\\WindowsPowerShell\\v1.0\\powershell.exe";
-    g_gf_pick = bd_spawn(ps, "-NoProfile -ExecutionPolicy Bypass -File tools\\setup_game_files.ps1", "build/setup_game_files.log", NULL);
-    if (!g_gf_pick) g_status = std::string(T("No se pudo abrir el selector (error ")) + std::to_string(GetLastError()) + ")";
+    g_gf_pick = bd_spawn_argv({ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\setup_game_files.ps1"}, "build/setup_game_files.log", false, &err);
+#else
+    g_gf_pick = bd_spawn_argv({bd_bash(), "tools/setup_game_files.sh"}, "build/setup_game_files.log", false, &err);
+#endif
+    if (!g_gf_pick) g_status = std::string(T("No se pudo abrir el selector (error ")) + std::to_string(err) + ")";
 }
-// [XC3] the add-on content (optional): tools/setup_game_files.ps1 -Dlc links targets\dlcs to the folder chosen
+// [XC3] the add-on content (optional)
 static void dlc_pick() {
     if (gf_busy() || bd_running()) return;
+    int err = 0;
+#ifdef _WIN32
     char sys[MAX_PATH] = "";
     GetSystemDirectoryA(sys, sizeof sys);
     std::string ps = std::string(sys) + "\\WindowsPowerShell\\v1.0\\powershell.exe";
-    g_dlc_pick = bd_spawn(ps, "-NoProfile -ExecutionPolicy Bypass -File tools\\setup_game_files.ps1 -Dlc", "build/setup_dlc.log", NULL);
-    if (!g_dlc_pick) g_status = std::string(T("No se pudo abrir el selector (error ")) + std::to_string(GetLastError()) + ")";
+    g_dlc_pick = bd_spawn_argv({ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\setup_game_files.ps1", "-Dlc"}, "build/setup_dlc.log", false, &err);
+#else
+    g_dlc_pick = bd_spawn_argv({bd_bash(), "tools/setup_game_files.sh", "--dlc"}, "build/setup_dlc.log", false, &err);
+#endif
+    if (!g_dlc_pick) g_status = std::string(T("No se pudo abrir el selector (error ")) + std::to_string(err) + ")";
 }
 // the add-ons in targets/dlcs whose two archives are there ("1, 2, 3, 4"; empty: none), as runtime/services/misc.c lists them
 static std::string dlc_found() {
@@ -945,16 +1098,6 @@ static std::string dlc_found() {
     return s;
 }
 
-// the job object the tools install and the build run in (one at a time): closing the launcher ends what they started
-static HANDLE bd_job() {
-    if (!g_bd_job) {
-        g_bd_job = CreateJobObjectA(NULL, NULL);
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {};
-        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (g_bd_job) SetInformationJobObject(g_bd_job, JobObjectExtendedLimitInformation, &li, sizeof li);
-    }
-    return g_bd_job;
-}
 // the last 16 KB of a log: the step of its last "=== k/<max> ..." line (1..max) and its last line
 static void log_tail(const char *log, int max, int *step, std::string *line) {
     FILE *f = fopen(path(log).c_str(), "rb");
@@ -975,24 +1118,38 @@ static void log_tail(const char *log, int max, int *step, std::string *line) {
     }
 }
 
-// [XC3] step 1: tools/setup_windows.ps1 (winget may ask for administrator rights to install MSYS2: Windows shows that)
+#ifdef _WIN32
+#define TOOLS_LOG "build/setup_windows.log"
+#define TOOLS_STEPS 4
+#else
+#define TOOLS_LOG "build/setup_linux.log"
+#define TOOLS_STEPS 5
+#endif
+
+// [XC3] step 1: tools/setup_windows.ps1 or tools/setup_linux.sh
 static void tl_start() {
     if (tl_running() || bd_running() || pc_running() || gf_busy()) return;
+    int err = 0;
+#ifdef _WIN32
     char sys[MAX_PATH] = "";
     GetSystemDirectoryA(sys, sizeof sys);
     std::string ps = std::string(sys) + "\\WindowsPowerShell\\v1.0\\powershell.exe";
-    g_tl_proc = bd_spawn(ps, "-NoProfile -ExecutionPolicy Bypass -File tools\\setup_windows.ps1", "build/setup_windows.log", bd_job());
-    if (!g_tl_proc) { g_status = std::string(T("Could not start the tools install (error ")) + std::to_string(GetLastError()) + ")"; return; }
+    g_tl_proc = bd_spawn_argv({ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\setup_windows.ps1"}, TOOLS_LOG, true, &err);
+#else
+    g_tl_proc = bd_spawn_argv({bd_bash(), "tools/setup_linux.sh"}, TOOLS_LOG, true, &err);
+#endif
+    if (!g_tl_proc) { g_status = std::string(T("Could not start the tools install (error ")) + std::to_string(err) + ")"; return; }
     g_tl_step = 0;
     g_tl_line.clear();
     g_status = T("Installing the build tools...");
 }
 static void tl_stop() {
-    if (!g_tl_proc) return;
-    if (g_bd_job) TerminateJobObject(g_bd_job, 1);
-    WaitForSingleObject(g_tl_proc, 3000);
-    CloseHandle(g_tl_proc);
-    g_tl_proc = NULL;
+    if (!tl_running()) return;
+#ifdef _WIN32
+    l_kill(g_tl_proc, g_bd_job);
+#else
+    l_kill(g_tl_proc, true);
+#endif
     g_status = T("Tools install stopped");
 }
 
@@ -1000,71 +1157,55 @@ static void bd_start() {
     if (bd_running() || tl_running() || pc_running() || gf_busy()) return;
     std::string bash = bd_bash();
     if (bash.empty()) return;
-    g_bd_proc = bd_spawn(bash, "-c \"scripts/build_all.sh\"", "build/build_all.log", bd_job());
-    if (!g_bd_proc) { g_status = std::string(T("No se pudo iniciar la compilación (error ")) + std::to_string(GetLastError()) + ")"; return; }
+    int err = 0;
+    g_bd_proc = bd_spawn_argv({bash, "-c", "scripts/build_all.sh"}, "build/build_all.log", true, &err);
+    if (!g_bd_proc) { g_status = std::string(T("No se pudo iniciar la compilación (error ")) + std::to_string(err) + ")"; return; }
     g_bd_step = 0;
     g_bd_line.clear();
     g_status = T("Compilando...");
 }
 static void bd_stop() {
-    if (!g_bd_proc) return;
-    if (g_bd_job) TerminateJobObject(g_bd_job, 1);
-    WaitForSingleObject(g_bd_proc, 3000);
-    CloseHandle(g_bd_proc);
-    g_bd_proc = NULL;
+    if (!bd_running()) return;
+#ifdef _WIN32
+    l_kill(g_bd_proc, g_bd_job);
+#else
+    l_kill(g_bd_proc, true);
+#endif
     g_status = T("Compilación detenida");
 }
 
 static void bd_poll() {
-    DWORD code = 1;
-    if (g_gf_proc && WaitForSingleObject(g_gf_proc, 0) == WAIT_OBJECT_0) {
-        GetExitCodeProcess(g_gf_proc, &code);
-        CloseHandle(g_gf_proc);
-        g_gf_proc = NULL;
-        g_gf_code = (int)code;
-    }
-    if (g_gf_pick && WaitForSingleObject(g_gf_pick, 0) == WAIT_OBJECT_0) {
-        GetExitCodeProcess(g_gf_pick, &code);
-        CloseHandle(g_gf_pick);
-        g_gf_pick = NULL;
+    int code = 1;
+    if (l_poll(g_gf_proc, &code)) g_gf_code = code;
+    if (l_poll(g_gf_pick, &code)) {
         if (code == 0) g_status = T("Archivos del juego listos");
         else if (code != 2) g_status = T("Esa carpeta no sirve (registro: build/setup_game_files.log)");
         gf_check();
     }
-    if (g_dlc_pick && WaitForSingleObject(g_dlc_pick, 0) == WAIT_OBJECT_0) {
-        GetExitCodeProcess(g_dlc_pick, &code);
-        CloseHandle(g_dlc_pick);
-        g_dlc_pick = NULL;
+    if (l_poll(g_dlc_pick, &code)) {
         if (code == 0) g_status = T("DLC ready");
         else if (code != 2) g_status = T("No DLC files in that folder (log: build/setup_dlc.log)");
     }
-    if (!g_bd_proc && !g_tl_proc) return;
+    if (!bd_running() && !tl_running()) return;
     static Uint64 last;
     Uint64 now = SDL_GetTicks();
     if (now - last < 300) return;
     last = now;
-    if (g_tl_proc) {
-        log_tail("build/setup_windows.log", 4, &g_tl_step, &g_tl_line);
-        if (WaitForSingleObject(g_tl_proc, 0) != WAIT_OBJECT_0) return;
-        GetExitCodeProcess(g_tl_proc, &code);
-        CloseHandle(g_tl_proc);
-        g_tl_proc = NULL;
-        g_status = code == 0 && bd_tools_ok() ? T("Build tools installed") : T("The tools install failed (log: build/setup_windows.log)");
+    if (tl_running()) {
+        log_tail(TOOLS_LOG, TOOLS_STEPS, &g_tl_step, &g_tl_line);
+        if (!l_poll(g_tl_proc, &code)) return;
+        g_linux_libs_ok = -1;
+        g_status = code == 0 && bd_tools_ok() ? T("Build tools installed") : T("The tools install failed (log: " TOOLS_LOG ")");
         g_gf_code = -2;  // (check_dump.py needs .venv: check the game files again)
         return;
     }
     log_tail("build/build_all.log", 5, &g_bd_step, &g_bd_line);
-    if (WaitForSingleObject(g_bd_proc, 0) != WAIT_OBJECT_0) return;
-    GetExitCodeProcess(g_bd_proc, &code);
-    CloseHandle(g_bd_proc);
-    g_bd_proc = NULL;
+    if (!l_poll(g_bd_proc, &code)) return;
     g_status = code == 0 ? T("Compilación terminada") : T("La compilación falló (registro: build/build_all.log)");
-    char me[MAX_PATH];
-    WIN32_FILE_ATTRIBUTE_DATA a;
-    if (GetModuleFileNameA(NULL, me, sizeof me) && GetFileAttributesExA(me, GetFileExInfoStandard, &a))
-        g_bd_new_launcher = CompareFileTime(&a.ftLastWriteTime, &g_self_time) != 0;
-    std::string cur = path("build/xenoblade3_launcher.exe");  // (the swapped-in exe has this name; ours was renamed)
-    if (GetFileAttributesExA(cur.c_str(), GetFileExInfoStandard, &a)) g_bd_new_launcher |= CompareFileTime(&a.ftLastWriteTime, &g_self_time) > 0;
+    char me[1024];
+    if (l_self_path(me, sizeof me)) g_bd_new_launcher = l_mtime(me) != g_self_mtime;
+    long long cur_mt = l_mtime(path(LAUNCHER_EXE));
+    if (cur_mt) g_bd_new_launcher |= cur_mt > g_self_mtime;
 }
 
 static void tab_build() {
@@ -1073,20 +1214,29 @@ static void tab_build() {
     bool tools = bd_tools_ok();
     if (tl_running()) {
         char t[64];
-        snprintf(t, sizeof t, T("Step %d of 4"), g_tl_step ? g_tl_step : 1);
-        ImGui::ProgressBar((g_tl_step ? g_tl_step - 1 : 0) / 4.0f + 0.1f, ImVec2(-150 * g_scale, 0), t);
+        snprintf(t, sizeof t, T("Step %d of %d"), g_tl_step ? g_tl_step : 1, TOOLS_STEPS);
+        ImGui::ProgressBar((g_tl_step ? g_tl_step - 1 : 0) / (float)TOOLS_STEPS + 0.1f, ImVec2(-150 * g_scale, 0), t);
         ImGui::SameLine();
         if (ImGui::Button(T("Stop##tools"), ImVec2(-1, 0))) tl_stop();
         ImGui::TextDisabled("%s", g_tl_line.c_str());
+#ifdef _WIN32
         ImGui::TextDisabled("%s", T("Windows may ask for administrator rights to install MSYS2."));
+#endif
     } else {
-        if (tools) ImGui::TextColored(pal::accent, "%s", T("Ready: MSYS2 with the libraries, Python 3.12, .venv"));
-        else ImGui::TextColored(pal::warn, "%s", T("Not installed yet: MSYS2 (SDL3, FFmpeg, Vulkan, shaderc, Opus), Python 3.12 and the recompiler packages (a few GB, 10-20 minutes)."));
+#ifdef _WIN32
+        if (tools) ImGui::TextColored(pal::accent, "%s", T("Ready: system libraries and .venv"));
+        else ImGui::TextColored(pal::warn, "%s", T("Not installed yet: build libraries (SDL3, FFmpeg, Vulkan, shaderc, Opus) and .venv packages."));
+#else
+        bool fsr_ok = exists("build/libffx_vk_linux.so") || exists("sdk/ffx-vk-linux/build/libffx_vk_linux.so");
+        if (tools && fsr_ok) ImGui::TextColored(pal::accent, "%s", T("Ready: system libraries, .venv, and FSR 3.1 / FSR 4 bridge"));
+        else if (tools) ImGui::TextColored(pal::warn, "%s", T("System libraries and .venv ready (click Update to download the FSR 3.1 / FSR 4 library)"));
+        else ImGui::TextColored(pal::warn, "%s", T("Not installed yet: build libraries (SDL3, FFmpeg, Vulkan, shaderc, Opus), .venv, and FSR library."));
+#endif
         ImGui::BeginDisabled(bd_running() || pc_running() || gf_busy());
         if (ImGui::Button(tools ? T("Update the build tools") : T("Install the build tools"))) tl_start();
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button(T("Open log##tools"))) ShellExecuteA(NULL, "open", path("build/setup_windows.log").c_str(), NULL, NULL, SW_SHOWNORMAL);
+        if (ImGui::Button(T("Open log##tools"))) l_open_path(path(TOOLS_LOG));
     }
     if (!tools || tl_running()) return;
     section(T("Archivos del juego"));
@@ -1130,12 +1280,12 @@ static void tab_build() {
         if (ImGui::Button(T("Compilar / actualizar"))) bd_start();
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button(T("Abrir registro"))) ShellExecuteA(NULL, "open", path("build/build_all.log").c_str(), NULL, NULL, SW_SHOWNORMAL);
+        if (ImGui::Button(T("Abrir registro"))) l_open_path(path("build/build_all.log"));
         if (g_bd_new_launcher) ImGui::TextColored(pal::accent, "%s", T("Vuelve a abrir el launcher para usar la versión nueva."));
     }
     // [XC3] step 4: the shader precompilation (Play also runs it when it was not done for this build)
     section(T("Shaders"));
-    if (!file_ok(get_game_exe_path().c_str())) { ImGui::TextDisabled("%s", T("After the build.")); return; }
+    if (!l_file_ok(get_game_exe_path())) { ImGui::TextDisabled("%s", T("After the build.")); return; }
     if (pc_running()) { ImGui::TextDisabled("%s", T("Precompiling the shaders (progress at the bottom)...")); return; }
     if (pc_done()) ImGui::TextColored(pal::accent, "%s", T("Precompiled for this build"));
     else ImGui::TextColored(pal::warn, "%s", T("Not precompiled for this build yet (a few minutes, once: fewer stutters the first time an area is seen)."));
@@ -1200,7 +1350,17 @@ static void tab_graphics() {
     section(T("Pantalla"));
     ImGui::Checkbox(T("Pantalla completa"), &g.fullscreen);
     ImGui::SetNextItemWidth(260 * g_scale);
-    ImGui::Combo(T("Tamaño de la ventana"), &g.win, k_wins, 5);
+    ImGui::Combo(T("Tamaño de la ventana"), &g.win, k_wins, 9);
+    {
+        static const char *const asp_ui[] = {"16:9 (Standard)", "Auto (Match window / display)", "21:9 (Ultrawide)", "32:9 (Super Ultrawide)"};
+        ImGui::SetNextItemWidth(300 * g_scale);
+        ImGui::Combo("Aspect ratio", &g.aspect, asp_ui, 4);
+        ImGui::SetItemTooltip("Native Hor+ ultrawide widens the 3D view.\nAuto matches your display (fullscreen) or window aspect ratio when wider than 16:9.");
+        if (g.aspect != 0) {
+            ImGui::Checkbox("Keep 16:9 HUD proportions (UI fit)", &g.ui_fit);
+            ImGui::SetItemTooltip("Prevents HUD/menus from stretching on ultrawide, anchors side HUD elements to the screen edges,\nand keeps world markers / speech bubbles aligned with 3D targets.");
+        }
+    }
     section(T("Resolución y escalado"));
     ImGui::SetNextItemWidth(360 * g_scale);
     ImGui::Combo(T("Resolución interna"), &g.res, TL(k_res_ui, 7).p, 7);
@@ -1383,20 +1543,33 @@ static void tab_controls() {
 // a later one wins for the same file); xcde.ini mod_<folder> = 0/1, on by default.
 static void scan_mods() {
     std::vector<Mod> found;
+#ifdef _WIN32
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(path("mods\\*").c_str(), &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do {
             if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
-            std::string rf = path((std::string("mods\\") + fd.cFileName + "\\romfs").c_str());
-            DWORD a = GetFileAttributesA(rf.c_str());
-            if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (!l_is_dir(path((std::string("mods/") + fd.cFileName + "/romfs").c_str()))) continue;
             Mod m{fd.cFileName, true};
             for (const Mod &o : g_mods) if (o.name == m.name) m.on = o.on;
             found.push_back(m);
         } while (FindNextFileA(h, &fd));
         FindClose(h);
     }
+#else
+    DIR *d = opendir(path("mods").c_str());
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            if (de->d_name[0] == '.') continue;
+            if (!l_is_dir(path((std::string("mods/") + de->d_name + "/romfs").c_str()))) continue;
+            Mod m{de->d_name, true};
+            for (const Mod &o : g_mods) if (o.name == m.name) m.on = o.on;
+            found.push_back(m);
+        }
+        closedir(d);
+    }
+#endif
     std::sort(found.begin(), found.end(), [](const Mod &a, const Mod &b) { return a.name < b.name; });
     for (const Mod &o : g_mods) {  // (keep the settings of folders not present now)
         bool here = false;
@@ -1406,52 +1579,74 @@ static void scan_mods() {
     g_mods = found;
 }
 
-// [XCDE] "Crear reporte": reports\xcde_report_<date>.zip with what a bug report needs - the last two game logs (this
-// run's and the previous one, build\lasrecomp*.log), xcde.ini and the newest crash report (crash\, text + minidump).
-// No saves or game files. Zipped by the tar.exe that Windows 10+ ships; the folder opens when it is done.
+// [XCDE] "Crear reporte": reports/xc3_report_<date>.zip with what a bug report needs - the last two game logs,
+// xc3.ini and the newest crash report (crash/). No saves or game files.
 static void make_report() {
     std::vector<std::string> files;
-    for (const char *f : {"build/lasrecomp.log", "build/lasrecomp.prev.log", INI_FILE})
-        if (GetFileAttributesA(path(f).c_str()) != INVALID_FILE_ATTRIBUTES) files.push_back(f);
-    WIN32_FIND_DATAA fd;
+    for (const char *f : {"build/lasrecomp.log", "build/lasrecomp.prev.log", "build/last_game.log", INI_FILE})
+        if (l_file_ok(path(f))) files.push_back(f);
     std::string newest;
+#ifdef _WIN32
+    WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(path("crash/crash_*.txt").c_str(), &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do if (newest.empty() || strcmp(fd.cFileName, newest.c_str()) > 0) newest = fd.cFileName; while (FindNextFileA(h, &fd));
         FindClose(h);
     }
+#else
+    DIR *cd = opendir(path("crash").c_str());
+    if (cd) {
+        struct dirent *de;
+        while ((de = readdir(cd))) {
+            size_t len = strlen(de->d_name);
+            if (!strncmp(de->d_name, "crash_", 6) && len > 4 && !strcmp(de->d_name + len - 4, ".txt"))
+                if (newest.empty() || strcmp(de->d_name, newest.c_str()) > 0) newest = de->d_name;
+        }
+        closedir(cd);
+    }
+#endif
     if (!newest.empty()) {  // (crash_<stamp>.txt sorts by date)
         files.push_back("crash/" + newest);
         std::string dmp = "crash/" + newest.substr(0, newest.size() - 4) + ".dmp";
-        if (GetFileAttributesA(path(dmp.c_str()).c_str()) != INVALID_FILE_ATTRIBUTES) files.push_back(dmp);
+        if (l_file_ok(path(dmp.c_str()))) files.push_back(dmp);
     }
     if (files.empty()) { g_status = T("No hay nada que reportar todavía (ni logs ni " INI_FILE ")"); return; }
-    CreateDirectoryA(path("reports").c_str(), NULL);
+    l_mkdir(path("reports"));
     char stamp[32];
     time_t now = time(NULL);
-    strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", localtime(&now));
+    struct tm tm_now;
+#ifdef _WIN32
+    localtime_s(&tm_now, &now);
+#else
+    localtime_r(&now, &tm_now);
+#endif
+    strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", &tm_now);
     std::string zip = std::string("reports/xc3_report_") + stamp + ".zip";
+    int code = 1;
+#ifdef _WIN32
     char sys[MAX_PATH];
     GetSystemDirectoryA(sys, sizeof sys);
     std::string tar = std::string(sys) + "\\tar.exe";
-    std::string cmd = "\"" + tar + "\" -a -c -f \"" + zip + "\"";
-    for (const std::string &f : files) cmd += " \"" + f + "\"";
-    std::vector<char> buf(cmd.begin(), cmd.end());
-    buf.push_back(0);
-    STARTUPINFOA si = {sizeof si};
-    PROCESS_INFORMATION pi;
-    if (!CreateProcessA(tar.c_str(), buf.data(), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, g_root.c_str(), &si, &pi)) {
-        g_status = T("No se pudo crear el reporte (falta tar.exe de Windows)");
-        return;
-    }
-    WaitForSingleObject(pi.hProcess, 30000);
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
+    std::vector<std::string> argv = {tar, "-a", "-c", "-f", zip};
+    for (const std::string &f : files) argv.push_back(f);
+    LProc p = l_spawn(argv, NULL, NULL, false);
+    if (!p) { g_status = T("No se pudo crear el reporte (falta tar.exe de Windows)"); return; }
+    WaitForSingleObject(p, 30000);
+    DWORD wcode = 1;
+    GetExitCodeProcess(p, &wcode);
+    CloseHandle(p);
+    code = (int)wcode;
+#else
+    std::vector<std::string> argv = {"python3", "-m", "zipfile", "-c", zip};
+    for (const std::string &f : files) argv.push_back(f);
+    LProc p = l_spawn(argv, NULL, false, false);
+    if (!p) { g_status = T("No se pudo crear el reporte"); return; }
+    int st = 0;
+    if (waitpid(p, &st, 0) > 0 && WIFEXITED(st)) code = WEXITSTATUS(st);
+#endif
     if (code) { g_status = T("No se pudo crear el reporte"); return; }
     g_status = std::string(T("Reporte creado: ")) + zip + T(" (adjúntalo al reportar el problema)");
-    ShellExecuteA(NULL, "open", path("reports").c_str(), NULL, NULL, SW_SHOWNORMAL);
+    l_open_path(path("reports"));
 }
 
 static void tab_mods() {
@@ -1462,8 +1657,8 @@ static void tab_mods() {
                        "cambian el mismo archivo, gana el último. Los mods de código (exefs, parches .pchtxt / IPS) no "
                        "funcionan en esta versión recompilada."));
     if (ImGui::Button(T("Abrir carpeta de mods"))) {
-        CreateDirectoryA(path("mods").c_str(), NULL);
-        ShellExecuteA(NULL, "open", path("mods").c_str(), NULL, NULL, SW_SHOWNORMAL);
+        l_mkdir(path("mods"));
+        l_open_path(path("mods"));
     }
     ImGui::SameLine();
     if (ImGui::Button(T("Actualizar lista"))) scan_mods();
@@ -1502,11 +1697,16 @@ static void llog(const char *fmt, ...) {
 }
 static int fail(const char *what) {
     char msg[1024];
-    snprintf(msg, sizeof msg, "%s\n\n%s\n\n(build\\launcher.log)", what, SDL_GetError());
+    snprintf(msg, sizeof msg, "%s\n\n%s\n\n(build/launcher.log)", what, SDL_GetError());
     llog("ERROR: %s: %s", what, SDL_GetError());
+#ifdef _WIN32
     MessageBoxA(NULL, msg, APP_NAME " - Launcher", MB_OK | MB_ICONERROR);
+#else
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, APP_NAME " - Launcher", msg, NULL);
+#endif
     return 1;
 }
+#ifdef _WIN32
 static LONG WINAPI crash_filter(EXCEPTION_POINTERS *e) {
     char msg[256];
     snprintf(msg, sizeof msg, "The launcher crashed (exception %#lx at %p).\n\n(build\\launcher.log)",
@@ -1515,9 +1715,22 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *e) {
     MessageBoxA(NULL, msg, APP_NAME " - Launcher", MB_OK | MB_ICONERROR);
     return EXCEPTION_EXECUTE_HANDLER;
 }
+#else
+static std::string find_linux_font(const char *pattern) {
+    FILE *p = popen(pattern, "r");
+    if (!p) return "";
+    char buf[512] = "";
+    if (fgets(buf, sizeof buf, p)) {
+        size_t n = strlen(buf);
+        while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+    }
+    pclose(p);
+    return buf[0] && l_file_ok(buf) ? std::string(buf) : "";
+}
+#endif
 
 int main(int argc, char **argv) {
-    // root: the folder above the launcher's build/ folder (or the working directory)
+    // root: the launcher's folder (or above build/ when started from build/)
     const char *base = SDL_GetBasePath();
     g_root = base ? base : ".";
     while (!g_root.empty() && (g_root.back() == '/' || g_root.back() == '\\')) g_root.pop_back();
@@ -1529,8 +1742,11 @@ int main(int argc, char **argv) {
     bool shot_pc = shot && argc > 4 && !strcmp(argv[4], "precompile");  // (... <tab> precompile: the bar after ~5 s of a run)
     // [XC3] ... <tab> build: the build's bar after ~5 s; ... <tab> build-wait: the tab once the build has ended
     bool shot_bd = shot && argc > 4 && !strcmp(argv[4], "build"), shot_bd_wait = shot && argc > 4 && !strcmp(argv[4], "build-wait");
-    g_llog = fopen((g_root + "\\build\\launcher.log").c_str(), "w");
+    l_mkdir(path("build"));
+    g_llog = fopen(path("build/launcher.log").c_str(), "w");
+#ifdef _WIN32
     SetUnhandledExceptionFilter(crash_filter);
+#endif
     llog("launcher start, root %s", g_root.c_str());
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");  // [XC3] the window's icon: resource 1 (launcher.rc)
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
@@ -1559,15 +1775,26 @@ int main(int argc, char **argv) {
     SDL_SetWindowSize(win, (int)(980 * scale), (int)(680 * scale));
     SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     if (!shot) SDL_ShowWindow(win);
-    {   // fonts: Segoe UI (text), Segoe UI Bold (section titles, PLAY), Bahnschrift (the title); each only if present
+    {
+#ifdef _WIN32
+        // fonts: Segoe UI (text), Segoe UI Bold (section titles, PLAY), Bahnschrift (the title); each only if present
         auto font = [&](const char *file, float size) -> ImFont * {
             std::string p = std::string("C:\\Windows\\Fonts\\") + file;
-            return GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES ? io.Fonts->AddFontFromFileTTF(p.c_str(), size * scale) : NULL;
+            return l_file_ok(p) ? io.Fonts->AddFontFromFileTTF(p.c_str(), size * scale) : NULL;
         };
         if (!font("segoeui.ttf", 17)) io.Fonts->AddFontDefault();
         g_font_bold = font("segoeuib.ttf", 17);
         g_font_title = font("bahnschrift.ttf", 34);
         if (!g_font_title) g_font_title = font("segoeuib.ttf", 30);
+#else
+        std::string reg = find_linux_font("fc-match -f '%{file}' 'sans:regular' 2>/dev/null");
+        std::string bold = find_linux_font("fc-match -f '%{file}' 'sans:bold' 2>/dev/null");
+        if (reg.empty() || !io.Fonts->AddFontFromFileTTF(reg.c_str(), 17 * scale)) io.Fonts->AddFontDefault();
+        if (!bold.empty()) {
+            g_font_bold = io.Fonts->AddFontFromFileTTF(bold.c_str(), 17 * scale);
+            g_font_title = io.Fonts->AddFontFromFileTTF(bold.c_str(), 32 * scale);
+        }
+#endif
     }
     ImGuiStyle &st = ImGui::GetStyle();
     theme_apply(st);
@@ -1577,9 +1804,8 @@ int main(int argc, char **argv) {
     if (exists("mods/launcher/background.png")) theme_load_background(ren, path("mods/launcher/background.png"));
     load();
     {   // (the launcher's own exe as it started: a build that replaced it says so - bd_poll)
-        char me[MAX_PATH];
-        WIN32_FILE_ATTRIBUTE_DATA a;
-        if (GetModuleFileNameA(NULL, me, sizeof me) && GetFileAttributesExA(me, GetFileExInfoStandard, &a)) g_self_time = a.ftLastWriteTime;
+        char me[1024];
+        if (l_self_path(me, sizeof me)) g_self_mtime = l_mtime(me);
     }
     bool have_game = exists("targets/exefs/main") || exists("targets/exefs");
     bool have_exe = have_game_exe();

@@ -1,10 +1,10 @@
 # XC3Recomp roadmap
 
-The plan for the native Windows port of *Xenoblade Chronicles 3* (version 2.2.0 or 2.2.1, build ID `82D187FE9EF9BE92`).
+The plan for the native Windows and Linux port of *Xenoblade Chronicles 3* (version 2.2.0 or 2.2.1, build ID `82D187FE9EF9BE92`).
 Each phase lists what is done and what is open; update it when an item lands (commit hash) or a new one is found.
-Status as of 2026-11-10.
+Status as of 2026-11-25.
 
-## Phase 1: Native Windows development
+## Phase 1: Native Windows & Linux development
 
 Status: **in progress**.
 
@@ -36,13 +36,17 @@ Done:
   2-byte aligned pool addresses (read in place since `59be42a`; now copied) and the water's stride of 34 (now copied
   with the stride rounded up to its largest component, and the pipeline built with that stride). Checked with the FR
   replay and ~19.5k frames of live play.
+- Colony 9 waterfall black / red box fixed: the game draws hidden unit cubes (depth prepass and G-buffer) with
+  `nvnPolygonStateSetCullFace` = `NVN_FACE_FRONT_AND_BACK` (3), which `runtime/nvn/vulkan/exec.c` mapped to
+  `VK_CULL_MODE_NONE` instead of `VK_CULL_MODE_FRONT_AND_BACK`.
+- Native Linux x86-64 support (`c3469ed`): Linux runtime (`runtime/platform/linux.c`), `tools/setup_linux.sh`,
+  DMA-BUF / `memfd` physical memory pool import into Vulkan, `ffx-vk-linux` bridge for FSR 3.1 / FSR 4 on Mesa RADV,
+  and native Linux launcher (`xenoblade3_launcher`).
 
 Open:
 - Future Redeemed: occasional blocky (mosaic) patches seen once in a replay - not examined; one guest crash
   (`f_7001192e00`, frame 907) in 1 of ~20 FR replays - not examined.
 - The DLC's shaders are not precompiled (precompile.c reads `bf3.ard` only); `bf3_dlc04.ard` has its own.
-- Black / red box by the Colony 9 waterfall: one draw (vs `61e0c6ed00`, fs `61e0c6f400`, G-buffer albedo pure red).
-  Not caused by the alias-region pool reads (checked with `XC3_PMM_MIRROR=1`, deterministic replay). Cause open.
 - (Rechecked 2026-11-06: the "about 17 fragment shaders failed to translate" note is resolved - those failures, VMNMX
   `0x3a..` / `0x3b..` and a TLD4S form, were in logs of 2026-10-28/29 before `fbf85d7`; precompilation now translates
   all 15,170 programs, 0 failed, and no tour or replay log since then has a translation failure.)
@@ -113,6 +117,26 @@ Done:
   above. Resumed after the fix (527 points, maps 22-30, 14 runs): every point reached, no crash, no device lost.
   Frames over 1 s at 16 points (11 in map 22, worst 2.5 s; 3 in map 25; 1 each in maps 27 and 29), median 41-85 ms
   per map (map 29: 408 ms).
+- Native Hor+ ultrawide (21:9, 32:9, auto; `runtime/hle/ultrawide.c`, `games/xc3/patches.py`, adapted from
+  xc3-recomp MIT): patches XC3's shipped resolution table (`main+0x14dfd8c`) to `base_w x 1080`, keeps the UI layout
+  canvas at `1280x720`, narrows flat 16:9 UI transforms (`xc3_ui_fit`) while shifting edge-anchored HUD panels toward
+  the screen sides (`ui_shift`), spreads world-projected markers by `1/k`, shifts the battle Arts palette inside
+  `mnu417_cont01.wilay` (LAGP) outward to both bottom corners, and uses rotation-invariant basis lengths
+  (`hypot(f[0], f[1])`) so spinning canvas-unit icons (boot loading ring, minimap compass) stay locked in place without
+  horizontal jumping across rotation cycles.
+- Direct Maxwell-to-SPIR-V translation & Vulkan Graphics Pipeline Library (GPL) (`runtime/nvn/maxwell/spirv_emit.c`,
+  `runtime/nvn/vulkan/device.c`, `runtime/nvn/vulkan/exec.c`): emits SPIR-V directly from Maxwell bytecode for ~99% of
+  shaders (bypassing GLSL + shaderc compilation with automatic fallback for rare forms), combined with
+  `VK_EXT_graphics_pipeline_library` fast-link pipelines and background optimization to significantly reduce cold-cache
+  shader stutter.
+- Draw distance / LOD & procedural grass radius scaling (`games/xc3/patches.py`, `runtime/host/settings_ini.c`,
+  `runtime/ui/menu_vk.cpp`): runtime `lod_scale` (`1.0x–4.0x`, `XC3_LOD_SCALE`, live in `F1 → Graphics` without
+  restart) across 22 patched sites covering dynamic object screen-space LODs (`main_323.c`), 3D Euclidean culling
+  (`main_334.c`), static map BVH & per-object 12-byte-stride LOD/fade tables (`main_338.c`: rocks, trees, buildings,
+  map props), instanced foliage/clutter BVH (`main_321.c`), distance density falloff (`main_326.c`), and the procedural
+  grass grid spawner/unloader (`main_321.c`, capped at `2.5x` radius / `6.25x` area to keep the `0x2c0000` cell pool
+  and `0x30000` draw-list arena safe, with instant grid refresh on live F1 changes). Colony 9 A/B check (frame 1500):
+  11.8% pixel delta at `2.0x–3.0x` with ~8.5–11.8% draw-call overhead and zero crashes.
 
 Open:
 - Test beyond the title screen, opening and Colony 9: Everblight canyon, battles, long cutscenes, other regions.
@@ -138,8 +162,10 @@ Done:
 - `tools/launcher`: graphics, upscaler, FPS, controls, button prompts, language, session recording, reports.
 - Launcher named "Xenoblade Chronicles 3" (`build/xenoblade3_launcher.exe`, `bf9de01`), dark theme, our own icon,
   optional background `mods/launcher/background.png` (`c15a3c7`).
-- Launcher options for presentation (V-Sync FIFO / Fast Sync mailbox / V-Sync off for VRR - FreeSync / G-Sync) and
-  anisotropic filtering, English launcher UI (`7baedf6`).
+- Launcher options for presentation (V-Sync FIFO / Fast Sync mailbox / V-Sync off for VRR - FreeSync / G-Sync),
+  anisotropic filtering, ultrawide aspect ratio & 16:9 HUD fit (`aspect`, `ui_fit`), live in-game Draw distance / LOD
+  selector (`F1 → Graphics`, `lod_scale`), and English launcher UI (`7baedf6` + `linux-support`).
+- Native Linux launcher build (`xenoblade3_launcher`) alongside Windows (`xenoblade3_launcher.exe`).
 - In game: cursor hidden while the window has the focus (`658faa1`); SMAA skipped while FSR / DLSS runs (`f0ad94e`).
 - `scripts/build_all.sh`: dump check, recompilation, build; shader precompilation.
 

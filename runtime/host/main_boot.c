@@ -6,8 +6,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <pthread.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include "../gamelib.h"
 #include "../hle.h"
@@ -22,7 +26,7 @@ const char *g_dlc_dir;
 const char *g_display_version = "2.2.0";
 #define NPDM_SHA256_2_2_1 "45a8ecf07093d0b6a60c9ef3c2199bf4398c15bb453017a449a2d7690d433b7f"
 
-#ifdef XCDE_GFX
+#if defined(XCDE_GFX) && defined(_WIN32)
 // [XCDE] T194: laptops with two GPUs (NVIDIA Optimus / AMD switchable graphics) run a program on the integrated one
 // unless the exe exports these; the driver reads them at start. (device.c then picks the discrete GPU among those
 // Vulkan lists; LARECOMP_GPU=<n> overrides.)
@@ -30,31 +34,60 @@ __declspec(dllexport) DWORD NvOptimusEnablement = 1;
 __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #endif
 
-// [XC3] SHA-256 of a small file as hex (advapi32), for the boot log: main.npdm is the one exefs file that differs
-// between 2.2.0 and 2.2.1, so a log tells the two apart. hex stays "" when the file or the hash is not available.
-#include <wincrypt.h>
+// [XC3] SHA-256 of a small file as hex, for the boot log: main.npdm is the one exefs file that differs
+// between 2.2.0 and 2.2.1, so a log tells the two apart. hex stays "" when the file is not available.
+static void sha256_block(uint32_t s[8], const uint8_t b[64]) {
+    static const uint32_t k[64] = {
+        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+        0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+        0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu, 0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+        0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u, 0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+        0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u, 0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+        0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+        0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u, 0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u};
+    uint32_t w[64], a = s[0], e0 = s[1], c = s[2], d = s[3], e = s[4], f = s[5], g = s[6], h = s[7];
+    for (int i = 0; i < 16; i++)
+        w[i] = ((uint32_t)b[i * 4] << 24) | ((uint32_t)b[i * 4 + 1] << 16) | ((uint32_t)b[i * 4 + 2] << 8) | b[i * 4 + 3];
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = ((w[i - 15] >> 7) | (w[i - 15] << 25)) ^ ((w[i - 15] >> 18) | (w[i - 15] << 14)) ^ (w[i - 15] >> 3);
+        uint32_t s1 = ((w[i - 2] >> 17) | (w[i - 2] << 15)) ^ ((w[i - 2] >> 19) | (w[i - 2] << 13)) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    for (int i = 0; i < 64; i++) {
+        uint32_t S1 = ((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7));
+        uint32_t ch = (e & f) ^ ((~e) & g), t1 = h + S1 + ch + k[i] + w[i];
+        uint32_t S0 = ((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10));
+        uint32_t maj = (a & e0) ^ (a & c) ^ (e0 & c), t2 = S0 + maj;
+        h = g; g = f; f = e; e = d + t1; d = c; c = e0; e0 = a; a = t1 + t2;
+    }
+    s[0] += a; s[1] += e0; s[2] += c; s[3] += d; s[4] += e; s[5] += f; s[6] += g; s[7] += h;
+}
 static void file_sha256(const char *path, char hex[65], long *size) {
     hex[0] = 0;
     *size = -1;
     FILE *f = fopen(path, "rb");
     if (!f) return;
-    HCRYPTPROV prov = 0;
-    HCRYPTHASH h = 0;
-    uint8_t buf[4096], dig[32];
-    DWORD dn = sizeof dig;
-    size_t n;
-    long total = 0;
-    if (CryptAcquireContextA(&prov, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) && CryptCreateHash(prov, CALG_SHA_256, 0, 0, &h)) {
-        bool ok = true;
-        while (ok && (n = fread(buf, 1, sizeof buf, f)) > 0) ok = CryptHashData(h, buf, (DWORD)n, 0), total += (long)n;
-        if (ok && CryptGetHashParam(h, HP_HASHVAL, dig, &dn, 0) && dn == sizeof dig) {
-            for (int i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", dig[i]);
-            *size = total;
+    uint32_t st[8] = {0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au, 0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
+    uint8_t blk[64], buf[4096];
+    size_t bl = 0, n;
+    uint64_t total = 0;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) {
+        total += n;
+        for (size_t i = 0; i < n; i++) {
+            blk[bl++] = buf[i];
+            if (bl == 64) { sha256_block(st, blk); bl = 0; }
         }
     }
-    if (h) CryptDestroyHash(h);
-    if (prov) CryptReleaseContext(prov, 0);
     fclose(f);
+    blk[bl++] = 0x80;
+    if (bl > 56) { while (bl < 64) blk[bl++] = 0; sha256_block(st, blk); bl = 0; }
+    while (bl < 56) blk[bl++] = 0;
+    uint64_t bits = total * 8;
+    for (int i = 0; i < 8; i++) blk[56 + i] = (uint8_t)(bits >> (56 - i * 8));
+    sha256_block(st, blk);
+    for (int i = 0; i < 8; i++) snprintf(hex + i * 8, 9, "%08x", st[i]);
+    *size = (long)total;
 }
 
 static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
@@ -88,14 +121,15 @@ __attribute__((constructor(101))) static void reserve_guest_space(void) {
     if (!plat_reserve_guest(lo, GUEST_HI)) {
         // [XCDE] T135: something the loader placed at random (ASLR) sits in the guest range in ~1 of 5 starts. A new
         // process gets a new layout: start this one again (same command line, same console), up to 8 times.
-        char n[16] = "0";
-        GetEnvironmentVariableA("XCDE_RELAUNCH", n, sizeof n);
-        int tries = atoi(n);
+        const char *env_tries = getenv("XCDE_RELAUNCH");
+        int tries = env_tries ? atoi(env_tries) : 0;
         fprintf(stderr, "[boot] guest address range %llx-%llx is not free (try %d)%s\n", (unsigned long long)GUEST_LO,
                 (unsigned long long)GUEST_HI, tries + 1, tries < 8 ? ": starting again" : "");
         if (tries < 8) {
+            char n[16];
             snprintf(n, sizeof n, "%d", tries + 1);
-            SetEnvironmentVariableA("XCDE_RELAUNCH", n);
+            setenv("XCDE_RELAUNCH", n, 1);
+#ifdef _WIN32
             STARTUPINFOA si = {.cb = sizeof si};
             PROCESS_INFORMATION pi;
             char exe[MAX_PATH];
@@ -113,6 +147,9 @@ __attribute__((constructor(101))) static void reserve_guest_space(void) {
                 GetExitCodeProcess(pi.hProcess, &code);
                 ExitProcess(code);
             }
+#else
+            plat_exec(NULL);
+#endif
         }
         fprintf(stderr, "FATAL: guest address range %llx-%llx is not free\n", (unsigned long long)GUEST_LO,
                 (unsigned long long)GUEST_HI);
@@ -121,9 +158,14 @@ __attribute__((constructor(101))) static void reserve_guest_space(void) {
 }
 
 // [XCDE] Watchdog (T027, first version): every few seconds the state of every guest thread; XCDE_WATCHDOG=<seconds>.
-static DWORD WINAPI watchdog_main(LPVOID p) {
+static void *watchdog_main(void *p) {
     unsigned secs = (unsigned)(uintptr_t)p;
-    for (;;) { Sleep(secs * 1000); LOG("[wd] ---- %u s ----"" %c", secs, 10); kernel_dump_threads(stderr); }
+    for (;;) {
+        plat_sleep_until_ns(plat_now_ns() + (uint64_t)secs * 1000000000ull);
+        LOG("[wd] ---- %u s ----"" %c", secs, 10);
+        kernel_dump_threads(stderr);
+    }
+    return NULL;
 }
 
 
@@ -159,7 +201,10 @@ int main(int argc, char **argv) {
     }
 
     diag_watchdog_start();
-    if (getenv("XCDE_WATCHDOG")) CreateThread(NULL, 0, watchdog_main, (LPVOID)(uintptr_t)atoi(getenv("XCDE_WATCHDOG")), 0, NULL);
+    if (getenv("XCDE_WATCHDOG")) {
+        pthread_t wt;
+        if (pthread_create(&wt, NULL, watchdog_main, (void *)(uintptr_t)atoi(getenv("XCDE_WATCHDOG"))) == 0) pthread_detach(wt);
+    }
     loader_load(exefs);
     kernel_init();
     dispatch_init();
@@ -189,6 +234,24 @@ int main(int argc, char **argv) {
     uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_");
     uint64_t start3 = start ? 0 : loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_S2_");  // [XC3] three callbacks
     if (!start && !start3) FATAL("nn::init::Start not found\n");
+#if defined(XCDE_GFX) && defined(__linux__)
+    // [XC3] Initialize Vulkan before guest threads start so Linux pmem can be backed by exported DMA-BUFs
+    // (RADV rejects VK_EXT_external_memory_host on memfd MAP_SHARED mappings).
+    extern void ui_window_init(void);
+    ui_window_init();
+#endif
+    {   // [XC3] Ultrawide: widen the game's resolution table (main+0x14dfd8c) before nn::init::Start reads it.
+        extern void xc3_ultrawide_init(int disp_w, int disp_h);
+        int dw = 0, dh = 0;
+#if defined(XCDE_GFX) && defined(__linux__)
+        extern void ui_display_size(int *w, int *h);
+        ui_display_size(&dw, &dh);
+#elif defined(_WIN32)
+        dw = GetSystemMetrics(SM_CXSCREEN);
+        dh = GetSystemMetrics(SM_CYSCREEN);
+#endif
+        xc3_ultrawide_init(dw, dh);
+    }
     KThread *t = kernel_create_main_thread(start ? start : start3, stack_size, prio);
     if (start3) {
         LOG("[boot] nn::init::Start with three rtld callbacks\n");

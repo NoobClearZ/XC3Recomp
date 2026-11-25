@@ -14,14 +14,25 @@
 // address across a switch that moves the code to another thread.
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <pthread.h>
+#include <sys/mman.h>
+#endif
 
 #include "../rt.h"
 
 typedef struct HFiber {
     uint64_t key;                 // guest FiberType*
     uint64_t fn, arg, stack, stack_size;
+#ifdef _WIN32
     void *host;                   // the host fiber
+#else
+    void *sp;                     // saved host stack pointer when suspended
+    void *stack_base;
+    size_t stack_bytes;
+#endif
     Cpu cpu;                      // this fiber's guest registers
     uint64_t tpidr, tpidrro;      // thread block of the host thread that runs it now (set by whoever switches to it)
     void *thread;
@@ -30,12 +41,18 @@ typedef struct HFiber {
 
 #define NBUCKETS 4096
 static HFiber *g_buckets[NBUCKETS];
+#ifdef _WIN32
 static CRITICAL_SECTION g_lock;
 static INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
 
 static BOOL CALLBACK init_lock(PINIT_ONCE o, PVOID p, PVOID *ctx) { (void)o; (void)p; (void)ctx; InitializeCriticalSection(&g_lock); return TRUE; }
 static void lock(void) { InitOnceExecuteOnce(&g_once, init_lock, NULL, NULL); EnterCriticalSection(&g_lock); }
 static void unlock(void) { LeaveCriticalSection(&g_lock); }
+#else
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static void lock(void) { pthread_mutex_lock(&g_lock); }
+static void unlock(void) { pthread_mutex_unlock(&g_lock); }
+#endif
 
 static unsigned bucket(uint64_t key) { return (unsigned)((key >> 4) * 0x9E3779B1u) % NBUCKETS; }
 static HFiber *find(uint64_t key) {
@@ -48,10 +65,11 @@ static HFiber *find(uint64_t key) {
 
 // ---- per host thread state, through non-inlined accessors
 static __thread uint64_t t_fiber;       // guest FiberType* running on this host thread now (0: the thread itself)
-static __thread void *t_root;           // the host fiber of the thread itself
+static __thread void *t_root;           // the host fiber (Windows) or saved root SP (POSIX) of the thread itself
 __attribute__((noinline)) static uint64_t cur_get(void) { __asm__ volatile("" ::: "memory"); return t_fiber; }
 __attribute__((noinline)) static void cur_set(uint64_t k) { t_fiber = k; __asm__ volatile("" ::: "memory"); }
 __attribute__((noinline)) static void *root_get(void) { __asm__ volatile("" ::: "memory"); return t_root; }
+#ifdef _WIN32
 __attribute__((noinline)) static void root_set(void *r) { t_root = r; __asm__ volatile("" ::: "memory"); }
 
 static void *ensure_root(void) {
@@ -62,6 +80,9 @@ static void *ensure_root(void) {
     }
     return r;
 }
+#else
+__attribute__((noinline)) static void **root_sp_slot(void) { __asm__ volatile("" ::: "memory"); return &t_root; }
+#endif
 
 // hand the caller's thread block to the fiber about to run on this host thread
 static void hand_over(HFiber *to, const Cpu *from) {
@@ -75,6 +96,7 @@ static void take_over(Cpu *c, const HFiber *f) {
     c->thread = f->thread;
 }
 
+#ifdef _WIN32
 static void CALLBACK fiber_main(void *p) {
     HFiber *f = p;
     for (;;) {
@@ -93,6 +115,58 @@ static void CALLBACK fiber_main(void *p) {
         // only reached if a finished fiber is switched to again: it starts over with its function
     }
 }
+#else
+#if !defined(__x86_64__)
+#error "POSIX fiber assembly context switch currently targets x86-64 SysV ABI"
+#endif
+extern void xc3_fiber_swap(void **from_sp, void *to_sp);
+extern void xc3_fiber_trampoline(void);
+__asm__(
+    ".text\n"
+    ".hidden xc3_fiber_swap\n"
+    ".globl xc3_fiber_swap\n"
+    ".type xc3_fiber_swap, @function\n"
+    "xc3_fiber_swap:\n"
+    "  pushq %rbx\n"
+    "  pushq %rbp\n"
+    "  pushq %r12\n"
+    "  pushq %r13\n"
+    "  pushq %r14\n"
+    "  pushq %r15\n"
+    "  movq %rsp, (%rdi)\n"
+    "  movq %rsi, %rsp\n"
+    "  popq %r15\n"
+    "  popq %r14\n"
+    "  popq %r13\n"
+    "  popq %r12\n"
+    "  popq %rbp\n"
+    "  popq %rbx\n"
+    "  ret\n"
+    ".hidden xc3_fiber_trampoline\n"
+    ".globl xc3_fiber_trampoline\n"
+    ".type xc3_fiber_trampoline, @function\n"
+    "xc3_fiber_trampoline:\n"
+    "  movq %r12, %rdi\n"
+    "  jmp xc3_fiber_entry\n"
+);
+
+__attribute__((visibility("hidden"), used)) void xc3_fiber_entry(HFiber *f) {
+    for (;;) {
+        Cpu *c = &f->cpu;
+        take_over(c, f);
+        c->x[0] = f->arg;
+        c->sp = (f->stack + f->stack_size) & ~15ull;
+        c->excl_addr = ~0ull;
+        guest_call(c, f->fn);                 // returns the fiber to switch to next, or null
+        uint64_t next = c->x[0];
+        HFiber *n = next ? find(next) : NULL;
+        if (next && !n) FATAL("[fiber] function of fiber %llx returned unknown fiber %llx\n", (unsigned long long)f->key, (unsigned long long)next);
+        if (n) hand_over(n, c);
+        cur_set(next);
+        xc3_fiber_swap(&f->sp, n ? n->sp : root_get());
+    }
+}
+#endif
 
 // ---- the HLE entry points (names fixed: gen.py --hle binds the SDK functions to hle_<mangled>)
 void hle__ZN2nn2os15InitializeFiberEPNS0_9FiberTypeEPFS2_PvES3_S3_mi(Cpu *c) {
@@ -105,16 +179,38 @@ void hle__ZN2nn2os15InitializeFiberEPNS0_9FiberTypeEPFS2_PvES3_S3_mi(Cpu *c) {
         f->key = key;
         f->next = g_buckets[bucket(key)];
         g_buckets[bucket(key)] = f;
-    } else if (f->host) {
-        DeleteFiber(f->host);  // re-initialized without Finalize: start fresh
-        f->host = NULL;
+    } else {
+#ifdef _WIN32
+        if (f->host) { DeleteFiber(f->host); f->host = NULL; }  // re-initialized without Finalize: start fresh
+#else
+        if (f->stack_base) { munmap(f->stack_base, f->stack_bytes); f->stack_base = NULL; f->sp = NULL; }
+#endif
     }
     unlock();
     f->fn = c->x[1], f->arg = c->x[2], f->stack = c->x[3], f->stack_size = c->x[4];
     memset(&f->cpu, 0, sizeof f->cpu);
     f->cpu.excl_addr = ~0ull;
+#ifdef _WIN32
     f->host = CreateFiberEx(256 * 1024, (SIZE_T)64 << 20, 0, fiber_main, f);
     if (!f->host) FATAL("[fiber] CreateFiber failed (%lu)\n", GetLastError());
+#else
+    size_t sz = (size_t)64 << 20;
+    uint8_t *base = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (base == MAP_FAILED) FATAL("[fiber] mmap stack failed\n");
+    mprotect(base, 0x1000, PROT_NONE);
+    f->stack_base = base;
+    f->stack_bytes = sz;
+    uint64_t *sp = (uint64_t *)(base + sz);
+    *--sp = 0;                                         // keeps 16-byte alignment at xc3_fiber_entry
+    *--sp = (uint64_t)(uintptr_t)xc3_fiber_trampoline;
+    *--sp = 0;                                         // rbx
+    *--sp = 0;                                         // rbp
+    *--sp = (uint64_t)(uintptr_t)f;                    // r12 -> rdi in trampoline
+    *--sp = 0;                                         // r13
+    *--sp = 0;                                         // r14
+    *--sp = 0;                                         // r15
+    f->sp = sp;
+#endif
 }
 
 void hle__ZN2nn2os13FinalizeFiberEPNS0_9FiberTypeE(Cpu *c) {
@@ -126,20 +222,34 @@ void hle__ZN2nn2os13FinalizeFiberEPNS0_9FiberTypeE(Cpu *c) {
     if (f) *pp = f->next;
     unlock();
     if (f) {
+#ifdef _WIN32
         if (f->host) DeleteFiber(f->host);
+#else
+        if (f->stack_base) munmap(f->stack_base, f->stack_bytes);
+#endif
         free(f);
     }
 }
 
 void hle__ZN2nn2os13SwitchToFiberEPNS0_9FiberTypeE(Cpu *c) {
     uint64_t key = c->x[0];
+#ifdef _WIN32
     void *root = ensure_root();
+#endif
     HFiber *n = key ? find(key) : NULL;
     if (key && !n) FATAL("[fiber] SwitchToFiber to unknown fiber %llx\n", (unsigned long long)key);
     uint64_t self = cur_get();
+    if (key == self) return;
+#ifndef _WIN32
+    HFiber *cur = self ? find(self) : NULL;
+#endif
     if (n) hand_over(n, c);
     cur_set(key);
+#ifdef _WIN32
     SwitchToFiber(n ? n->host : root);
+#else
+    xc3_fiber_swap(cur ? &cur->sp : root_sp_slot(), n ? n->sp : root_get());
+#endif
     // resumed: possibly on another host thread than the one that suspended us. The one that switched to us wrote
     // its thread block into our record (or, for the thread's own context, nothing changed).
     cur_set(self);

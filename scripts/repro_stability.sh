@@ -4,13 +4,15 @@
 # Classifies each run: OK (timeout reached, frames still advancing), HANG (frame counter stalled before the
 # timeout), CRASH (exit code != 124). Logs: <outdir>/run_NN.log
 cd "$(dirname "$0")/.."
-export PATH="/c/msys64/ucrt64/bin:$PATH"
+. scripts/env.sh
 N=${1:-30}; SECS=${2:-30}; OUT=${3:-build/rep}
+EXE="build/xc3${XC3_EXE_EXT}"
+[ -f "$EXE" ] || EXE="build/xcde${XC3_EXE_EXT}"
 mkdir -p "$OUT"; rm -f "$OUT"/run_*.log "$OUT"/summary.txt
 ok=0; hang=0; crash=0
 for i in $(seq -w 1 "$N"); do
   log="$OUT/run_$i.log"
-  LARECOMP_HIDDEN=1 LARECOMP_FPS_INTERVAL=1 timeout "$SECS" build/xcde.exe targets > "$log" 2>&1
+  LARECOMP_HIDDEN=1 LARECOMP_FPS_INTERVAL=1 timeout "$SECS" "$EXE" targets > "$log" 2>&1
   rc=$?
   last=$(grep -a '^\[vk\] t=' "$log" | tail -1 | sed -E 's/\[vk\] t=([0-9.]+) frame ([0-9]+).*/\1 \2/')
   lt=${last% *}; lf=${last#* }

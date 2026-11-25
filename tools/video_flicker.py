@@ -8,7 +8,8 @@ args = sys.argv[3:]
 crop = float(args[args.index('--crop-sides') + 1]) if '--crop-sides' in args else 0.0
 thr = int(args[args.index('--thresh') + 1]) if '--thresh' in args else 35
 W, H = 160, 90
-p = subprocess.Popen([r'C:\msys64\ucrt64\bin\ffmpeg.exe', '-v', 'error', '-i', video, '-vf', f'scale={W}:{H},format=gray',
+ffmpeg = r'C:\msys64\ucrt64\bin\ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
+p = subprocess.Popen([ffmpeg, '-v', 'error', '-i', video, '-vf', f'scale={W}:{H},format=gray',
                       '-f', 'rawvideo', '-'], stdout=subprocess.PIPE)
 c0 = int(W * crop)
 cnt = []

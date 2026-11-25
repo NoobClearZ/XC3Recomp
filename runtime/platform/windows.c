@@ -130,6 +130,20 @@ int plat_protect(uint64_t addr, uint64_t size, int prot) {
     return VirtualProtect((void *)(uintptr_t)addr, size, p, &old) ? 0 : -1;
 }
 
+bool plat_mem_readable(uint64_t addr, size_t size) {
+    if (!addr) return false;
+    uint64_t end = addr + (size ? size : 1);
+    for (uint64_t a = addr; a < end;) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((void *)(uintptr_t)a, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT) return false;
+        if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+        uint64_t next = (uint64_t)(uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        if (next <= a) return false;
+        a = next;
+    }
+    return true;
+}
+
 // ---- time
 static LARGE_INTEGER qpf;
 

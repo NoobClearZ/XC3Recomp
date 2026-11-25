@@ -926,23 +926,35 @@ NVN(nvnQueuePresentTexture) {
     int i = (int)A(2);
     extern uint64_t backend_queue_present(NvnTexture *t);
     extern bool xc3_frame_present(void);
+    extern void xc3_ui_frame(void);
+    xc3_ui_frame();
     // [XC3] above 30 fps (runtime/hle/framepace.c): the present is held to the limit and the frame step measured here.
     // The game's limiter returns at once then, so its end-of-frame wait for the GPU (the frame lag hook in nvnSyncWait,
-    // lr 700124fb70) does not run either: the frame lag is kept here. On (the default): the worker has taken the
-    // previous present (one frame in flight); off: this one. The worker queues at most 2 presents in any case.
+    // lr 700124fb70) does not run either: keep both the worker wait and the GPU fence wait here so the CPU never laps
+    // XC3's double-buffered GPU buffers during a GPU spike (frame_lag on: 1 frame in flight; off: 0 frames in flight).
     bool rt = xc3_frame_present();
     if (i >= 0 && i < w->num) {
         if (backend_async()) {
             uint64_t ticket = backend_queue_present(HOST(NvnTexture, w->textures[i]));
             static uint64_t prev;
             if (rt) {
-                extern void backend_wait_ticket(uint64_t ticket);
+                extern uint64_t backend_wait_present_seq(uint64_t ticket);
                 uint64_t wait = g_settings.frame_lag ? prev : ticket;
-                if (wait) backend_wait_ticket(wait);
+                if (wait) {
+                    uint64_t seq = backend_wait_present_seq(wait);
+                    if (seq) renderer_wait_seq(seq);
+                }
             }
             prev = ticket;
         } else {
             backend_present(HOST(NvnTexture, w->textures[i]));
+            if (rt) {
+                static uint64_t prev_seq;
+                uint64_t cur_seq = renderer_fence_seq();
+                uint64_t wait_seq = g_settings.frame_lag ? prev_seq : cur_seq;
+                if (wait_seq) renderer_wait_seq(wait_seq);
+                prev_seq = cur_seq;
+            }
         }
     }
     if (getenv("XCDE_LOG_PACE")) {  // [XCDE] vsyncs between presents (the game's real frame interval)
