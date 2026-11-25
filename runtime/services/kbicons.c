@@ -758,6 +758,7 @@ bool kbicons_init(void) { return true; }
 // the new block must fit the old one's compressed size, so the game's offsets and sizes stay. Known blocks of 2.2.0 / 2.2.1;
 // each is checked by its header's name, and left alone on any mismatch.
 #include <zstd.h>
+#include "../hle/ultrawide.h"
 static const struct { uint64_t off; const char *name; } k_ard_blocks[] = {
     {0x22d6aa4e0ull, "icon_button.wilay"},
     {0x22b703630ull, "font_icon.wilay"},
@@ -796,6 +797,11 @@ int kbicons_ard_patches(const char *ard, int style, uint64_t *offs, uint8_t **da
         ch = fnv(ch, &ds, sizeof ds);
         ch = fnv(ch, &cs, sizeof cs);
         ch = fnv(ch, k_ard_blocks[i].name, strlen(k_ard_blocks[i].name));
+        bool uw_hud = !strcmp(k_ard_blocks[i].name, "mnu417_cont01.wilay") && xc3_ui_fit_scale() < 1.0f;
+        if (uw_hud) {
+            float uw_k = xc3_ui_fit_scale();
+            ch = fnv(ch, &uw_k, sizeof uw_k);
+        }
         char prefix[256], cp[512];
         snprintf(prefix, sizeof prefix, "ard_%s_", k_ard_blocks[i].name);
         snprintf(cp, sizeof cp, "cache/kbicons/%s%016llx", prefix, (unsigned long long)ch);
@@ -819,6 +825,7 @@ int kbicons_ard_patches(const char *ard, int style, uint64_t *offs, uint8_t **da
         uint64_t nlen;
         uint8_t *nd = kbicons_draw_buf(path, d, got, &nlen);
         if (!nd) continue;
+        if (uw_hud) xc3_uw_patch_battle_hud(nd, (size_t)nlen);
         size_t cap = ZSTD_compressBound(nlen);
         uint8_t *blk = calloc(1, 0x30 + (cap > cs ? cap : cs));
         size_t ncs = ZSTD_compress(blk + 0x30, cap, nd, nlen, 16);

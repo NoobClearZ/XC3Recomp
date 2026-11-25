@@ -43,7 +43,7 @@ static unsigned xfb_ctrl_rr;
 static int xfb_ctrl_find(uint64_t ctrl) { for (int i = 0; i < n_xfb_ctrl; i++) if (xfb_ctrl[i].ctrl == ctrl) return i; return -1; }
 static uint64_t g_draws_total;  // [XCDE] T240 (XCDE_TRACE_PRESENT: draws in each presented frame)
 uint64_t vk_draws_total(void) { return g_draws_total; }
-static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
+static uint64_t stat_draws, stat_skipped, stat_async_skips, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 // [XCDE] Which skip site drops draws: counts per source line, the first few occurrences are logged.
 static void skip_note(int line) {
     static int counts[8192];
@@ -61,6 +61,7 @@ static uint64_t prof_exec, prof_draw, prof_sets, prof_vtx, prof_submit, prof_pre
 static VkQueryPool prof_qp;
 static uint64_t prof_same_pipe, prof_same_prog;  // (profiler: draws repeating the previous draw's program / pipeline)
 static _Atomic uint64_t stat_gpl_cached, stat_gpl_linked, stat_gpl_libs, stat_gpl_opt;  // [XCDE] T188 (stats line)
+static _Atomic uint64_t stat_spv_direct, stat_spv_fallback;  // [XC3] direct Maxwell -> SPIR-V vs GLSL/shaderc fallback
 static uint32_t pipe_count(void);  // (stats line)
 static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) never reset: hitch log
 static uint32_t prof_end_line[16384];  // passes ended, by the exec.c line that ended them (0: submit / present)
@@ -920,80 +921,56 @@ static bool sync_shaders(void) {
     return v;
 }
 
-// Shader translation: one dedicated thread (the translator isn't re-entrant - translate.c's RSC2 string ring - and
-// translating on the game thread cost up to ~90 ms per frame on entering an area). Compiles go on to the workers.
-static pthread_mutex_t translate_lock = PTHREAD_MUTEX_INITIALIZER;  // (compute shaders translate on the game thread)
-// [XCDE] A thread that needs a translation now (a draw waiting for its program, a compute dispatch) goes before the
-// translator thread's queue. The lock isn't fair: on entering an area the game registers hundreds of programs, the
-// translator thread translates their variants back to back (T163 prewarm, ~0.1-0.5 ms each) and re-took the lock
-// each time before the waiting draw got it - measured 98 ms waits for the lock with 0.1 ms of translation of its own
-// (frame drops to ~50 fps when entering a new part of Colony 9). The translator now lets urgent callers in first.
-static _Atomic int xlat_urgent;
-static _Thread_local bool tl_translator;
-static void xlat_lock(void) {
-    if (tl_translator) { while (atomic_load(&xlat_urgent)) sched_yield(); pthread_mutex_lock(&translate_lock); return; }
-    atomic_fetch_add(&xlat_urgent, 1);
-    pthread_mutex_lock(&translate_lock);
-    atomic_fetch_sub(&xlat_urgent, 1);
-}
+// [XC3] translate.c is re-entrant (all scratch buffers are _Thread_local): shader translation runs in parallel across
+// the worker pool without a global mutex. run_translate dispatches directly onto the worker pool.
 static Job *tjobs_head, *tjobs_tail;
 static pthread_mutex_t tjobs_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t tjobs_cond = PTHREAD_COND_INITIALIZER;
-static void *translator(void *a) {
-    (void)a;
-    tl_translator = true;
-    for (;;) {
-        pthread_mutex_lock(&tjobs_lock);
-        while (!tjobs_head) pthread_cond_wait(&tjobs_cond, &tjobs_lock);
-        Job *j = tjobs_head;
-        tjobs_head = j->next;
-        if (!tjobs_head) tjobs_tail = NULL;
-        pthread_mutex_unlock(&tjobs_lock);
-        j->fn(j->arg);
-        atomic_fetch_sub(&g_xlat_queued, 1);
-        free(j);
-    }
-    return NULL;
-}
 static bool sync_shaders(void);
+static void run_job(void (*fn)(void *), void *arg);
 static void run_translate(void (*fn)(void *), void *arg) {
-    if (sync_shaders()) { fn(arg); return; }
-    static bool started;
-    if (!started) { started = true; pthread_t t; big_stack_thread(&t, translator); }
-    Job *j = malloc(sizeof *j);
-    j->fn = fn; j->arg = arg; j->next = NULL;
-    atomic_fetch_add(&g_xlat_queued, 1);
-    pthread_mutex_lock(&tjobs_lock);
-    if (tjobs_tail) tjobs_tail->next = j; else tjobs_head = j;
-    tjobs_tail = j;
-    pthread_cond_signal(&tjobs_cond);
-    pthread_mutex_unlock(&tjobs_lock);
+    run_job(fn, arg);
 }
 
 static __thread bool tl_inline_jobs;  // [XCDE] T187: this thread runs its jobs itself (precompilation threads)
+static void start_workers_once(void) {
+    // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
+    extern int plat_cpu_count(void);
+    int cpus = plat_cpu_count(), n = cpus - 4;  // (the process's own CPUs: the low-spec test mode narrows them)
+    if (n < 4) n = 4;
+    // [XCDE] R4 (docs/spec_lowend_gpu.md): on 6 logical CPUs or fewer (Ryzen 3 3200G: 4) leave two to the game and
+    // render threads (SpartanPort 4b843a7: workers starved the GPU thread of a 4-thread i5, 36 -> 59 fps)
+    if (cpus <= 6) n = cpus - 2 < 2 ? 2 : cpus - 2;
+    LOG("[vk] %d shader workers (%d logical CPUs)\n", n, cpus);
+    if (n > 16) n = 16;
+    for (int i = 0; i < n; i++) { pthread_t t; big_stack_thread(&t, worker); }
+}
+static void ensure_workers(void) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, start_workers_once);
+}
 static void run_job(void (*fn)(void *), void *arg) {
     if (sync_shaders() || tl_inline_jobs) { fn(arg); return; }
-    static bool started;
-    if (!started) {
-        started = true;
-        // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
-        extern int plat_cpu_count(void);
-        int cpus = plat_cpu_count(), n = cpus - 4;  // (the process's own CPUs: the low-spec test mode narrows them)
-        if (n < 4) n = 4;
-        // [XCDE] R4 (docs/spec_lowend_gpu.md): on 6 logical CPUs or fewer (Ryzen 3 3200G: 4) leave two to the game and
-        // render threads (SpartanPort 4b843a7: workers starved the GPU thread of a 4-thread i5, 36 -> 59 fps)
-        if (cpus <= 6) n = cpus - 2 < 2 ? 2 : cpus - 2;
-        static int logged;
-        if (!logged++) LOG("[vk] %d shader workers (%d logical CPUs)\n", n, cpus);
-        if (n > 16) n = 16;
-        for (int i = 0; i < n; i++) { pthread_t t; big_stack_thread(&t, worker); }
-    }
+    ensure_workers();
     Job *j = malloc(sizeof *j);
     j->fn = fn; j->arg = arg; j->next = NULL;
     atomic_fetch_add(&g_jobs_queued, 1);
     pthread_mutex_lock(&jobs_lock);
     if (jobs_tail) jobs_tail->next = j; else jobs_head = j;
     jobs_tail = j;
+    pthread_cond_signal(&jobs_cond);
+    pthread_mutex_unlock(&jobs_lock);
+}
+// [XC3] Queue a high-priority job at the head of the worker queue (used to compile cold GPL VS + FS libraries in parallel).
+static void run_job_front(void (*fn)(void *), void *arg) {
+    if (sync_shaders() || tl_inline_jobs) { fn(arg); return; }
+    ensure_workers();
+    Job *j = malloc(sizeof *j);
+    j->fn = fn; j->arg = arg;
+    atomic_fetch_add(&g_jobs_queued, 1);
+    pthread_mutex_lock(&jobs_lock);
+    j->next = jobs_head;
+    jobs_head = j;
+    if (!jobs_tail) jobs_tail = j;
     pthread_cond_signal(&jobs_cond);
     pthread_mutex_unlock(&jobs_lock);
 }
@@ -1181,14 +1158,15 @@ const char *renderer_stats(void) {
     }
     extern uint64_t g_tex_bytes, g_tex_astc_bytes;  // (textures.c)
     snprintf(stats_text, sizeof stats_text,
-             "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB, occlusion %llu (%llu hidden), build waits %llu (%.1fms), prewarm %llu progs %llu pipes, gpl cached %llu linked %llu libs %llu optimized %llu, textures %.0f MB (astc %.0f MB), pipelines %u",
-             (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
+             "%llu draws, %llu skipped (async %llu), %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB, occlusion %llu (%llu hidden), build waits %llu (%.1fms), prewarm %llu progs %llu pipes, gpl cached %llu linked %llu libs %llu optimized %llu, spv direct %llu fallback %llu, textures %.0f MB (astc %.0f MB), pipelines %u",
+             (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_async_skips, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
              atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0,
              (unsigned long long)stat_occ_reports, (unsigned long long)stat_occ_hidden, (unsigned long long)stat_build_waits,
              stat_build_wait_ns / 1e6, (unsigned long long)stat_prewarm_progs, (unsigned long long)stat_prewarm_pipes,
              (unsigned long long)atomic_exchange(&stat_gpl_cached, 0), (unsigned long long)atomic_exchange(&stat_gpl_linked, 0),
              (unsigned long long)atomic_exchange(&stat_gpl_libs, 0), (unsigned long long)atomic_exchange(&stat_gpl_opt, 0),
+             (unsigned long long)atomic_load(&stat_spv_direct), (unsigned long long)atomic_load(&stat_spv_fallback),
              g_tex_bytes / 1048576.0, g_tex_astc_bytes / 1048576.0, pipe_count());
     stat_feedback_copies = stat_upload_bytes = stat_occ_reports = stat_occ_hidden = stat_build_waits = stat_build_wait_ns = 0;
     fb_stats_flush();
@@ -1271,7 +1249,7 @@ const char *renderer_stats(void) {
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
-    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
+    stat_draws = stat_skipped = stat_async_skips = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
     return stats_text;
 }
 
@@ -1340,22 +1318,30 @@ static int debug_pass_no;
 // LARECOMP_VK_STATE_FILTER=0: every draw sets everything, as before.
 enum { SS_PIPE = 1 << 0, SS_DT = 1 << 1, SS_DW = 1 << 2, SS_DOP = 1 << 3, SS_STEN = 1 << 4, SS_SFACE0 = 1 << 5, SS_SFACE1 = 1 << 6,
        SS_BC = 1 << 7, SS_CULL = 1 << 8, SS_FF = 1 << 9, SS_TOPO = 1 << 10, SS_PRE = 1 << 11, SS_DBE = 1 << 12, SS_DB = 1 << 13,
-       SS_VP = 1 << 14, SS_SC = 1 << 15, SS_IB = 1 << 16 };
+       SS_VP = 1 << 14, SS_SC = 1 << 15, SS_IB = 1 << 16,
+       SS_VI = 1 << 17, SS_POLY = 1 << 18, SS_A2C = 1 << 19, SS_BLEND = 1 << 20, SS_WMASK = 1 << 21 };
 static struct {
     uint32_t known;  // SS_* bits: the value below is what the command buffer has
     uint32_t vb_known;  // per vertex binding
     VkPipeline pipe;
-    VkBool32 dt, dw, sten, pre, dbe;
+    VkBool32 dt, dw, sten, pre, dbe, a2c;
     VkCompareOp dop;
     uint32_t sface[2][7];  // fail, pass, depth fail, compare, compare mask, write mask, reference
     float bc[4], db[3];
     VkCullModeFlags cull;
     VkFrontFace ff;
     VkPrimitiveTopology topo;
+    VkPolygonMode poly_mode;
     VkViewport vp;
     VkRect2D sc;
     VkBuffer ib; VkDeviceSize io; VkIndexType it;
     VkBuffer vb[17]; VkDeviceSize vo[17], vsz[17];
+    uint32_t vi_attr_mask, vi_used_streams;
+    uint32_t vi_attr_fmt[32], vi_attr_off[32], vi_attr_bind[32];
+    uint32_t vi_stride[17], vi_divisor[17];
+    uint32_t blend_ncolor, wmask_ncolor;
+    uint8_t blend_on, blend[8][8];
+    uint32_t wmask[8];
 } ss;
 static int ss_on = -1;
 static void ss_forget(void) { ss.known = 0; ss.vb_known = 0; }
@@ -1602,13 +1588,26 @@ static void pass_barrier(VkCommandBuffer cb, bool was_in_pass) {
 }
 
 // this pass's attachments: written from now on (after begin_pass resolved them: a first use creates the image there)
+static inline void tex_mark_drawn(TexBackend *b, uint64_t now) {
+    if (!b || !now) return;
+    if (b->cur_draw_frame != now) {
+        b->prev_draw_frame = b->cur_draw_frame;
+        b->cur_draw_frame = now;
+    }
+}
 static void pass_mark_attachments(void) {
+    uint64_t fnow = renderer_present_count() + 1;
     for (int i = 0; i < st.rt.ncolor && i < 8; i++)
         if (st.rt.color[i] && st.rt.color[i]->backend) {
             TexBackend *b = st.rt.color[i]->backend;
             b->w_epoch = pass_epoch; b->w_att = att_epoch;
+            tex_mark_drawn(b, fnow);
         }
-    if (st.rt.depth && st.rt.depth->backend) { TexBackend *b = st.rt.depth->backend; b->w_epoch = pass_epoch; b->w_att = att_epoch; }
+    if (st.rt.depth && st.rt.depth->backend) {
+        TexBackend *b = st.rt.depth->backend;
+        b->w_epoch = pass_epoch; b->w_att = att_epoch;
+        tex_mark_drawn(b, fnow);
+    }
 }
 
 static bool split_pending;  // (split_submit: submit at the next pass boundary)
@@ -1968,54 +1967,106 @@ static void save_glsl(const char *src, uint64_t addr, const char *suffix) {
     if (f) { fputs(src, f); fclose(f); }
 }
 
+static bool direct_spirv_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XC3_DIRECT_SPIRV");
+        on = !(e && atoi(e) == 0) && !getenv("LARECOMP_SAVE_MSL") && !getenv("XCDE_GLSL_DIR");
+    }
+    return on;
+}
+
+static void dump_direct_spv(const uint32_t *spv, size_t nwords, int stage, uint64_t code) {
+    static const char *dir = (const char *)1;
+    if (dir == (const char *)1) dir = getenv("XC3_DUMP_DIRECT_SPV");
+    if (!dir || !*dir) return;
+    static _Atomic uint32_t seq;
+    uint32_t id = atomic_fetch_add(&seq, 1);
+    if (id >= 2000) return;
+    char path[512];
+    snprintf(path, sizeof path, "%s/%04u_%s_%llx.spv", dir, id, stage == STAGE_VERTEX ? "vs" : "fs", (unsigned long long)code);
+    FILE *f = fopen(path, "wb");
+    if (f) { fwrite(spv, 4, nwords, f); fclose(f); }
+}
+
 static void compile_program(void *arg) {
     Prog *p = arg;
     size_t nv = 0, nf = 0;
-    const char *fs_src = p->fi->msl;
-    char *fs_over = NULL;
-    if (getenv("XCDE_GLSL_DIR")) {  // [XCDE] debugging: a hand-edited fragment shader (<dir>/<code addr>_fs.glsl) replaces the translated one
-        char path[512];
-        snprintf(path, sizeof path, "%s/%llx_fs.glsl", getenv("XCDE_GLSL_DIR"), (unsigned long long)p->code[1]);
-        FILE *f = fopen(path, "rb");
-        if (f) {
-            fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-            fs_over = malloc((size_t)n + 1);
-            if (fs_over && fread(fs_over, 1, (size_t)n, f) == (size_t)n) { fs_over[n] = 0; fs_src = fs_over; LOG("[vk] fragment shader %llx replaced from %s\n", (unsigned long long)p->code[1], path); }
-            fclose(f);
-        }
-    }
-    const char *vs_src = p->vi->msl;
-    char *vs_over = NULL;
-    if (getenv("XCDE_GLSL_DIR")) {  // [XCDE] the same for vertex shaders (<dir>/<code addr>_vs.glsl)
-        char path[512];
-        snprintf(path, sizeof path, "%s/%llx_vs.glsl", getenv("XCDE_GLSL_DIR"), (unsigned long long)p->code[0]);
-        FILE *f = fopen(path, "rb");
-        if (f) {
-            fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-            vs_over = malloc((size_t)n + 1);
-            if (vs_over && fread(vs_over, 1, (size_t)n, f) == (size_t)n) { vs_over[n] = 0; vs_src = vs_over; LOG("[vk] vertex shader %llx replaced from %s\n", (unsigned long long)p->code[0], path); }
-            fclose(f);
-        }
-    }
+    uint32_t *sv = NULL, *sf = NULL;
+    bool sv_owned = false, sf_owned = false;
     unsigned miss0 = vk_spirv_tl_misses;
-    uint32_t *sv = vk_glsl_to_spirv(vs_src, STAGE_VERTEX, "vs", &nv);
-    uint32_t *sf = sv ? vk_glsl_to_spirv(fs_src, STAGE_FRAGMENT, "fs", &nf) : NULL;
-    free(fs_over); free(vs_over);
-    if (!sv || !sf) { free(sv); free(sf); atomic_store(&p->state, 2); return; }
+
+    if (p->vi->spv) {
+        sv = p->vi->spv; nv = p->vi->spv_words;
+        dump_direct_spv(sv, nv, STAGE_VERTEX, p->code[0]);
+    } else {
+        const char *vs_src = p->vi->msl;
+        char *vs_over = NULL;
+        if (getenv("XCDE_GLSL_DIR")) {
+            char path[512];
+            snprintf(path, sizeof path, "%s/%llx_vs.glsl", getenv("XCDE_GLSL_DIR"), (unsigned long long)p->code[0]);
+            FILE *f = fopen(path, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+                vs_over = malloc((size_t)n + 1);
+                if (vs_over && fread(vs_over, 1, (size_t)n, f) == (size_t)n) { vs_over[n] = 0; vs_src = vs_over; LOG("[vk] vertex shader %llx replaced from %s\n", (unsigned long long)p->code[0], path); }
+                fclose(f);
+            }
+        }
+        sv = vk_glsl_to_spirv(vs_src, STAGE_VERTEX, "vs", &nv);
+        sv_owned = true;
+        free(vs_over);
+    }
+
+    if (sv) {
+        if (p->fi->spv) {
+            sf = p->fi->spv; nf = p->fi->spv_words;
+            dump_direct_spv(sf, nf, STAGE_FRAGMENT, p->code[1]);
+        } else {
+            const char *fs_src = p->fi->msl;
+            char *fs_over = NULL;
+            if (getenv("XCDE_GLSL_DIR")) {
+                char path[512];
+                snprintf(path, sizeof path, "%s/%llx_fs.glsl", getenv("XCDE_GLSL_DIR"), (unsigned long long)p->code[1]);
+                FILE *f = fopen(path, "rb");
+                if (f) {
+                    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+                    fs_over = malloc((size_t)n + 1);
+                    if (fs_over && fread(fs_over, 1, (size_t)n, f) == (size_t)n) { fs_over[n] = 0; fs_src = fs_over; LOG("[vk] fragment shader %llx replaced from %s\n", (unsigned long long)p->code[1], path); }
+                    fclose(f);
+                }
+            }
+            sf = vk_glsl_to_spirv(fs_src, STAGE_FRAGMENT, "fs", &nf);
+            sf_owned = true;
+            free(fs_over);
+        }
+    }
+
+    if (!sv || !sf) {
+        if (sv_owned) free(sv);
+        if (sf_owned) free(sf);
+        atomic_store(&p->state, 2);
+        return;
+    }
     p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
     p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
     if (p->gi) {  // [XCDE] geometry stage
         size_t ng = 0;
         uint32_t *sg = vk_glsl_to_spirv(p->gi->msl, STAGE_GEOMETRY, "gs", &ng);
-        if (!sg) { free(sv); free(sf); atomic_store(&p->state, 2); return; }
+        if (!sg) {
+            if (sv_owned) free(sv);
+            if (sf_owned) free(sf);
+            atomic_store(&p->state, 2);
+            return;
+        }
         p->nbinds += vk_reflect(sg, ng, p->binds + p->nbinds, MAX_BIND - p->nbinds);
         p->gs = vk_module(sg, ng);
         free(sg);
     }
     p->vs = vk_module(sv, nv);
     p->fs = vk_module(sf, nf);
-    free(sv);
-    free(sf);
+    if (sv_owned) free(sv); else { free(p->vi->spv); p->vi->spv = NULL; p->vi->spv_words = 0; }
+    if (sf_owned) free(sf); else { free(p->fi->spv); p->fi->spv = NULL; p->fi->spv_words = 0; }
     p->layout = make_layout(p, p->gi ? 3 : 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
     p->spv_new = (uint8_t)(vk_spirv_tl_misses - miss0);
     p->t_c1 = SDL_GetTicksNS();
@@ -2040,49 +2091,59 @@ static void pmem_translate_on(void) {
     maxwell_pmem_size = g_pmem_reserved ? ALIAS_SIZE : 0;
 }
 
+static ShaderInfo *translate_stage(const uint8_t *src, size_t cmax, size_t csize, int stage, const ShaderKey *key) {
+    if (direct_spirv_on()) {
+        ShaderInfo *si = maxwell_translate_spirv(src, cmax, csize, stage, key);
+        if (si && si->spv) { atomic_fetch_add(&stat_spv_direct, 1); return si; }
+    }
+    atomic_fetch_add(&stat_spv_fallback, 1);
+    return maxwell_translate(src, cmax, csize, stage, key);
+}
+
 static void translate_program(void *arg) {
     Prog *p = arg;
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     pmem_translate_on();
     p->t_x0 = SDL_GetTicksNS();
-    xlat_lock();
-    p->t_xl = SDL_GetTicksNS();
+    p->t_xl = p->t_x0;
     static int trace_tr = -1;  // [XCDE] XCDE_TRACE_TRANSLATE=1: start / end of every translation (finds a translation that never ends)
     if (trace_tr < 0) trace_tr = getenv("XCDE_TRACE_TRANSLATE") != NULL;
     if (trace_tr) LOG("[xlat] begin vs=%llx fs=%llx""%c", (unsigned long long)p->code[0], (unsigned long long)p->code[1], 10);
-    p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->src[0], p->cmax[0], p->csize[0], STAGE_VERTEX, &p->vkey);
-    if (p->vi->msl && p->gcode) {  // [XCDE] geometry stage: fed by the vertex outputs, feeds the fragment inputs
+    p->vi = translate_stage((const uint8_t *)(uintptr_t)p->src[0], p->cmax[0], p->csize[0], STAGE_VERTEX, &p->vkey);
+    bool vs_ok = p->vi && (p->vi->spv || p->vi->msl);
+    if (vs_ok && p->gcode) {  // [XCDE] geometry stage: fed by the vertex outputs, feeds the fragment inputs
         p->gkey.vs_out_mask = p->vi->out_mask;
         p->gi = maxwell_translate((const uint8_t *)(uintptr_t)p->gsrc, p->gcmax, p->gcsize, STAGE_GEOMETRY, &p->gkey);
         if (!p->gi->msl) LOG("[shader] GS translate failed: %s (code %llx)\n", p->gi->error, (unsigned long long)p->gcode);
     }
-    if (p->vi->msl && (!p->gcode || p->gi->msl) && p->no_fs) {  // [XCDE] depth-only: an empty fragment shader
+    bool gs_ok = !p->gcode || (p->gi && p->gi->msl);
+    if (vs_ok && gs_ok && p->no_fs) {  // [XCDE] depth-only: an empty fragment shader
         p->fi = calloc(1, sizeof *p->fi);
         p->fi->stage = STAGE_FRAGMENT;
         p->fi->msl = strdup("#version 460\nvoid main() {}\n");
-    } else if (p->vi->msl && (!p->gcode || p->gi->msl)) {
+    } else if (vs_ok && gs_ok) {
         p->fkey.vs_out_mask = p->gi ? p->gi->out_mask : p->vi->out_mask;
-        p->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->src[1], p->cmax[1], p->csize[1], STAGE_FRAGMENT, &p->fkey);
+        p->fi = translate_stage((const uint8_t *)(uintptr_t)p->src[1], p->cmax[1], p->csize[1], STAGE_FRAGMENT, &p->fkey);
     }
     if (trace_tr) LOG("[xlat] end   vs=%llx fs=%llx""%c", (unsigned long long)p->code[0], (unsigned long long)p->code[1], 10);
-    pthread_mutex_unlock(&translate_lock);
     p->t_x1 = SDL_GetTicksNS();
-    if (!p->vi->msl) {
-        LOG("[shader] VS translate failed: %s (code %llx)\n", p->vi->error, (unsigned long long)p->code[0]);
+    if (!vs_ok) {
+        LOG("[shader] VS translate failed: %s (code %llx)\n", p->vi ? p->vi->error : "null", (unsigned long long)p->code[0]);
         atomic_store(&p->state, 2);
         return;
     }
-    if (!p->fi || !p->fi->msl) {
+    bool fi_ok = p->fi && (p->fi->spv || p->fi->msl);
+    if (!fi_ok) {
         if (p->fi) LOG("[shader] FS translate failed: %s\n", p->fi->error);
         atomic_store(&p->state, 2);
         return;
     }
-    p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
-    save_glsl(p->vi->msl, p->code[0], "vs");
-    save_glsl(p->fi->msl, p->code[1], "fs");
-    if (p->gi) save_glsl(p->gi->msl, p->gcode, "gs");
-    run_job(compile_program, p);
+    p->vs_uses_vid = p->vi->uses_vid || (p->vi->msl && strstr(p->vi->msl, "gl_VertexIndex") != NULL);
+    if (p->vi->msl) save_glsl(p->vi->msl, p->code[0], "vs");
+    if (p->fi->msl) save_glsl(p->fi->msl, p->code[1], "fs");
+    if (p->gi && p->gi->msl) save_glsl(p->gi->msl, p->gcode, "gs");
+    compile_program(p);
 }
 
 // [XCDE] T185: program and pipeline tables (render thread only) grow. Fixed at 4096 / 8192 entries with a probe loop that
@@ -2500,7 +2561,7 @@ static uint32_t pipe_count(void) { return pipe_tab.n; }
 // stage) has no blending; the advanced blend mode byte is never applied (audited); the alpha factors / equation of a
 // target whose alpha isn't written, and the colour ones of a target whose RGB isn't written, give values that are
 // discarded - set to the NVN defaults (ONE, ZERO, ADD). XCDE_CANON=0: off.
-static void pipe_key_canon(PipeKey *k) {
+static void pipe_key_canon_base(PipeKey *k) {
     static int on = -1;
     if (on < 0) on = !(getenv("XCDE_CANON") && atoi(getenv("XCDE_CANON")) == 0);
     if (!on) return;
@@ -2516,6 +2577,26 @@ static void pipe_key_canon(PipeKey *k) {
         if (!(k->write_mask[i] & 8)) { b[3] = 2; b[4] = 1; b[6] = 1; }
         if (!(k->write_mask[i] & 7)) { b[1] = 2; b[2] = 1; b[5] = 1; }
     }
+}
+static void pipe_key_canon(PipeKey *k) {
+    pipe_key_canon_base(k);
+    // [XC3] Strip fixed-function state handled dynamically on this GPU so pipelines differing only there share one handle.
+    if (g_vk.dyn_vi) {
+        memset(k->attr_fmt, 0, sizeof k->attr_fmt);
+        memset(k->attr_off, 0, sizeof k->attr_off);
+        memset(k->attr_bind, 0, sizeof k->attr_bind);
+        k->attr_mask = 0;
+        memset(k->stride, 0, sizeof k->stride);
+        memset(k->divisor, 0, sizeof k->divisor);
+        k->used_streams = 0;
+    }
+    if (g_vk.dyn_poly) k->poly_fill = 1;
+    if (g_vk.dyn_a2c) k->a2c = 0;
+    if (g_vk.dyn_blend_en && g_vk.dyn_blend_eq) {
+        k->blend_on = 0;
+        memset(k->blend, 0, sizeof k->blend);
+    }
+    if (g_vk.dyn_wmask) memset(k->write_mask, 0, sizeof k->write_mask);
 }
 
 // 8 bytes a step (PipeKey is ~700 bytes, hashed per draw); in-memory tables only - hmix values are compared with
@@ -2648,13 +2729,15 @@ static VkResult gpl_vi(const PipeKey *k, VkPipeline *out) {
     VkVertexInputBindingDescription vb[17];
     VkVertexInputBindingDivisorDescriptionEXT vd[17];
     uint32_t na = 0, nb = 0, nd = 0;
-    for (int i = 0; i < 32; i++)
-        if (k->attr_mask & (1u << i)) va[na++] = (VkVertexInputAttributeDescription){(uint32_t)i, k->attr_bind[i], k->attr_fmt[i], k->attr_off[i]};
-    for (uint32_t s = 0; s < 17; s++) {
-        if (!(k->used_streams & (1u << s))) continue;
-        bool inst = k->divisor[s] != 0;
-        vb[nb++] = (VkVertexInputBindingDescription){s, k->stride[s], inst ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX};
-        if (inst && k->divisor[s] > 1 && g_vk.divisor) vd[nd++] = (VkVertexInputBindingDivisorDescriptionEXT){s, k->divisor[s]};
+    if (!g_vk.dyn_vi) {
+        for (int i = 0; i < 32; i++)
+            if (k->attr_mask & (1u << i)) va[na++] = (VkVertexInputAttributeDescription){(uint32_t)i, k->attr_bind[i], k->attr_fmt[i], k->attr_off[i]};
+        for (uint32_t s = 0; s < 17; s++) {
+            if (!(k->used_streams & (1u << s))) continue;
+            bool inst = k->divisor[s] != 0;
+            vb[nb++] = (VkVertexInputBindingDescription){s, k->stride[s], inst ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX};
+            if (inst && k->divisor[s] > 1 && g_vk.divisor) vd[nd++] = (VkVertexInputBindingDivisorDescriptionEXT){s, k->divisor[s]};
+        }
     }
     VkPipelineVertexInputDivisorStateCreateInfoEXT dvi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT,
                                                           .vertexBindingDivisorCount = nd, .pVertexBindingDivisors = vd};
@@ -2663,9 +2746,14 @@ static VkResult gpl_vi(const PipeKey *k, VkPipeline *out) {
                                                .vertexAttributeDescriptionCount = na, .pVertexAttributeDescriptions = va};
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
                                                  .topology = topo_class_base(k->topo_class)};
+    VkDynamicState dyn[4];
+    uint32_t ndyn = sizeof DYN_VI / sizeof DYN_VI[0];
+    memcpy(dyn, DYN_VI, sizeof DYN_VI);
+    if (g_vk.dyn_vi) dyn[ndyn++] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                                           .dynamicStateCount = sizeof DYN_VI / sizeof DYN_VI[0], .pDynamicStates = DYN_VI};
-    VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pVertexInputState = &vi,
+                                           .dynamicStateCount = ndyn, .pDynamicStates = dyn};
+    VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+                                       .pVertexInputState = g_vk.dyn_vi ? NULL : &vi,
                                        .pInputAssemblyState = &ia, .pDynamicState = &dy};
     return gpl_make(&pi, VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT, out);
 }
@@ -2677,8 +2765,12 @@ static VkResult gpl_pre(const PipeKey *k, VkPipeline *out) {
     VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
     VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
                                                  .polygonMode = k->poly_fill ? VK_POLYGON_MODE_FILL : VK_POLYGON_MODE_LINE, .lineWidth = 1};
+    VkDynamicState dyn[12];
+    uint32_t ndyn = sizeof DYN_PRE / sizeof DYN_PRE[0];
+    memcpy(dyn, DYN_PRE, sizeof DYN_PRE);
+    if (g_vk.dyn_poly) dyn[ndyn++] = VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                                           .dynamicStateCount = sizeof DYN_PRE / sizeof DYN_PRE[0], .pDynamicStates = DYN_PRE};
+                                           .dynamicStateCount = ndyn, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = k->prog->gs ? 2 : 1,
                                        .pStages = st, .pViewportState = &vs, .pRasterizationState = &rs, .pDynamicState = &dy,
@@ -2692,8 +2784,12 @@ static VkResult gpl_fs(const PipeKey *k, VkPipeline *out) {
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                .rasterizationSamples = (VkSampleCountFlagBits)k->samples, .alphaToCoverageEnable = k->a2c};
     VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    VkDynamicState dyn[12];
+    uint32_t ndyn = sizeof DYN_FS / sizeof DYN_FS[0];
+    memcpy(dyn, DYN_FS, sizeof DYN_FS);
+    if (g_vk.dyn_a2c) dyn[ndyn++] = VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT;
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                                           .dynamicStateCount = sizeof DYN_FS / sizeof DYN_FS[0], .pDynamicStates = DYN_FS};
+                                           .dynamicStateCount = ndyn, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 1, .pStages = &st,
                                        .pMultisampleState = &ms, .pDepthStencilState = &ds, .pDynamicState = &dy, .layout = k->prog->layout};
@@ -2720,8 +2816,17 @@ static VkResult gpl_fo(const PipeKey *k, VkPipeline *out) {
                                               .logicOpEnable = k->logic_op != 0, .logicOp = k->logic_op ? (VkLogicOp)(k->logic_op - 1) : VK_LOGIC_OP_COPY};
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                .rasterizationSamples = (VkSampleCountFlagBits)k->samples, .alphaToCoverageEnable = k->a2c};
+    VkDynamicState dyn[8];
+    uint32_t ndyn = sizeof DYN_FO / sizeof DYN_FO[0];
+    memcpy(dyn, DYN_FO, sizeof DYN_FO);
+    if (g_vk.dyn_blend_en && g_vk.dyn_blend_eq) {
+        dyn[ndyn++] = VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT;
+        dyn[ndyn++] = VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT;
+    }
+    if (g_vk.dyn_wmask) dyn[ndyn++] = VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT;
+    if (g_vk.dyn_a2c) dyn[ndyn++] = VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT;
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                                           .dynamicStateCount = sizeof DYN_FO / sizeof DYN_FO[0], .pDynamicStates = DYN_FO};
+                                           .dynamicStateCount = ndyn, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor,
                                         .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                         .stencilAttachmentFormat = k->stencil};
@@ -2820,6 +2925,14 @@ static void gpl_prebuild_variant(void *arg) {
 static void libs_release(void *libs[4]) {
     for (int i = 0; i < 4; i++) if (libs[i]) { atomic_fetch_sub(&((GplLib *)libs[i])->refs, 1); libs[i] = NULL; }
 }
+typedef struct { PipeKey k; uint64_t kf; } GplFsJob;
+static void gpl_fs_worker(void *arg) {
+    GplFsJob *j = arg;
+    pthread_rwlock_rdlock(&gpl_rw);
+    gpl_get(j->kf, gpl_fs, &j->k);
+    pthread_rwlock_unlock(&gpl_rw);
+    free(j);
+}
 static VkResult gpl_link(const PipeKey *k, VkPipeline *out, void *ents[4]) {
     uint64_t kv = 0x9E3779B97F4A7C15ull, kp, kf, ko;
     {   // vertex input: attributes, streams, topology class
@@ -2832,7 +2945,8 @@ static VkResult gpl_link(const PipeKey *k, VkPipeline *out, void *ents[4]) {
     kp = gpl_key_pre(k);
     kf = gpl_key_fs(k);
     {   uint32_t w[8 + 3 + 3 + 16 + 8], n = 0;
-        w[n++] = k->ncolor; w[n++] = k->depth; w[n++] = k->stencil; w[n++] = k->samples; w[n++] = k->a2c; w[n++] = k->prog->no_fs;
+        w[n++] = k->ncolor; w[n++] = k->depth; w[n++] = k->stencil; w[n++] = k->samples; w[n++] = k->a2c;
+        w[n++] = g_vk.dyn_wmask ? 0 : k->prog->no_fs;
         w[n++] = k->blend_on; w[n++] = k->logic_op;
         for (uint32_t i = 0; i < k->ncolor && i < 8; i++) { w[n++] = k->color[i]; w[n++] = k->write_mask[i]; }
         ko = hash_words(0x27D4EB2F165667C5ull, w, n * 4);
@@ -2840,9 +2954,26 @@ static VkResult gpl_link(const PipeKey *k, VkPipeline *out, void *ents[4]) {
     }
     // (kind in the top two bits: the four tables share one hash table)
     pthread_rwlock_rdlock(&gpl_rw);  // [XCDE] T242: no library eviction while their handles are in use
+    // [XC3] Parallel cold VS + FS GPL builds: kick off FS compilation on a worker while this thread compiles VS.
+    GplFsJob *fjob = NULL;
+    if (k->prog->fs && !sync_shaders() && !tl_inline_jobs && !gpl_ready(kp) && !gpl_ready(kf)) {
+        fjob = malloc(sizeof *fjob);
+        if (fjob) {
+            fjob->k = *k;
+            fjob->kf = kf;
+            run_job_front(gpl_fs_worker, fjob);
+        }
+    }
     GplLib *e[4] = {0};
-    VkPipeline libs[4] = {gpl_get_e((kv & ~(3ull << 62)) | (0ull << 62), gpl_vi, k, &e[0]), gpl_get_e(kp, gpl_pre, k, &e[1]),
-                          gpl_get_e(kf, gpl_fs, k, &e[2]), gpl_get_e((ko & ~(3ull << 62)) | (3ull << 62), gpl_fo, k, &e[3])};
+    VkPipeline libs[4];
+    libs[0] = gpl_get_e((kv & ~(3ull << 62)) | (0ull << 62), gpl_vi, k, &e[0]);
+    libs[1] = gpl_get_e(kp, gpl_pre, k, &e[1]);
+    if (fjob) {
+        Job *stolen = take_job(&jobs_head, &jobs_tail, &jobs_lock, fjob);
+        if (stolen) { atomic_fetch_sub(&g_jobs_queued, 1); free(stolen); free(fjob); }
+    }
+    libs[2] = gpl_get_e(kf, gpl_fs, k, &e[2]);
+    libs[3] = gpl_get_e((ko & ~(3ull << 62)) | (3ull << 62), gpl_fo, k, &e[3]);
     VkResult r = VK_ERROR_UNKNOWN;
     if (libs[0] && libs[1] && libs[2] && libs[3]) {
         VkPipelineLibraryCreateInfoKHR li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = 4, .pLibraries = libs};
@@ -3097,13 +3228,15 @@ static VkResult pipeline_whole(const PipeKey *k, VkPipelineCreateFlags flags, Vk
     VkVertexInputBindingDescription vb[17];
     VkVertexInputBindingDivisorDescriptionEXT vd[17];
     uint32_t na = 0, nb = 0, nd = 0;
-    for (int i = 0; i < 32; i++)
-        if (k->attr_mask & (1u << i)) va[na++] = (VkVertexInputAttributeDescription){(uint32_t)i, k->attr_bind[i], k->attr_fmt[i], k->attr_off[i]};
-    for (uint32_t s = 0; s < 17; s++) {
-        if (!(k->used_streams & (1u << s))) continue;
-        bool inst = k->divisor[s] != 0;
-        vb[nb++] = (VkVertexInputBindingDescription){s, k->stride[s], inst ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX};
-        if (inst && k->divisor[s] > 1 && g_vk.divisor) vd[nd++] = (VkVertexInputBindingDivisorDescriptionEXT){s, k->divisor[s]};
+    if (!g_vk.dyn_vi) {
+        for (int i = 0; i < 32; i++)
+            if (k->attr_mask & (1u << i)) va[na++] = (VkVertexInputAttributeDescription){(uint32_t)i, k->attr_bind[i], k->attr_fmt[i], k->attr_off[i]};
+        for (uint32_t s = 0; s < 17; s++) {
+            if (!(k->used_streams & (1u << s))) continue;
+            bool inst = k->divisor[s] != 0;
+            vb[nb++] = (VkVertexInputBindingDescription){s, k->stride[s], inst ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX};
+            if (inst && k->divisor[s] > 1 && g_vk.divisor) vd[nd++] = (VkVertexInputBindingDivisorDescriptionEXT){s, k->divisor[s]};
+        }
     }
     VkPipelineVertexInputDivisorStateCreateInfoEXT dvi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT,
                                                           .vertexBindingDivisorCount = nd, .pVertexBindingDivisors = vd};
@@ -3135,13 +3268,24 @@ static VkResult pipeline_whole(const PipeKey *k, VkPipelineCreateFlags flags, Vk
     VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
                                               .attachmentCount = k->ncolor, .pAttachments = cba,
                                               .logicOpEnable = k->logic_op != 0, .logicOp = k->logic_op ? (VkLogicOp)(k->logic_op - 1) : VK_LOGIC_OP_COPY};
+    VkDynamicState dyn[NDYN + 6];
+    uint32_t ndyn = NDYN;
+    memcpy(dyn, DYN, sizeof DYN);
+    if (g_vk.dyn_vi) dyn[ndyn++] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
+    if (g_vk.dyn_poly) dyn[ndyn++] = VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
+    if (g_vk.dyn_a2c) dyn[ndyn++] = VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT;
+    if (g_vk.dyn_blend_en && g_vk.dyn_blend_eq) {
+        dyn[ndyn++] = VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT;
+        dyn[ndyn++] = VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT;
+    }
+    if (g_vk.dyn_wmask) dyn[ndyn++] = VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT;
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                                           .dynamicStateCount = NDYN, .pDynamicStates = DYN};
+                                           .dynamicStateCount = ndyn, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor,
                                         .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                         .stencilAttachmentFormat = k->stencil};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = k->prog->gs ? 3 : 2,
-                                       .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
+                                       .pStages = stages, .pVertexInputState = g_vk.dyn_vi ? NULL : &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = k->prog->layout, .flags = flags};
     return vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, out);
@@ -5324,10 +5468,8 @@ static CsProg *compute_program(NvnProgram *np) {
     pmem_translate_on();
     ShaderKey k = {0};
     k.glsl = 1;
-    xlat_lock();
     cp->si = maxwell_translate((const uint8_t *)(uintptr_t)nvn_stage_code(ss), ss->const_offset ? ss->const_offset : 0x10000,
                                 ss->const_offset ? ss->const_size : 0, STAGE_COMPUTE, &k);
-    pthread_mutex_unlock(&translate_lock);
     cp->p.vi = cp->si;
     if (!cp->si->msl) {
         LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)ss->code_addr);
@@ -5682,6 +5824,42 @@ static void draw(CmdRec *r, bool indexed) {
     if (thumb) writeback_texture(thumb);
     PROF_ADD(prof_draw);
 }
+// [XC3] Selective async skip (XC3_PIPE_SKIP): skip per-frame draws (targeting images rendered in the last 3 frames)
+// whose program or cold pipeline libraries are still building, promoting their job to the worker queue head.
+// One-shot passes (LUTs, volume/probe bakes, save thumbnails), transform feedback, deterministic runs, and warm GPL
+// fast-links still wait synchronously so nothing is permanently missing and warm links have zero pop-in.
+// 0 = off (legacy), 1 = normal per-frame draws only, 2 = normal + full-screen per-frame draws (default).
+static int pipe_skip_mode(void) {
+    static int m = -1;
+    if (m < 0) { const char *e = getenv("XC3_PIPE_SKIP"); m = e ? atoi(e) : 2; }
+    return sync_shaders() ? 0 : m;
+}
+static bool targets_recent(void) {
+    uint64_t now = renderer_present_count() + 1;
+    if (now <= 1) return false;
+    for (int i = 0; i < st.rt.ncolor && i < 8; i++) {
+        NvnTexture *t = st.rt.color[i];
+        if (!t || !t->backend) continue;
+        TexBackend *b = t->backend;
+        uint64_t prev = b->cur_draw_frame == now ? b->prev_draw_frame : b->cur_draw_frame;
+        if (prev && now > prev && now - prev <= 3) return true;
+    }
+    if (st.rt.depth && st.rt.depth->backend) {
+        TexBackend *b = st.rt.depth->backend;
+        uint64_t prev = b->cur_draw_frame == now ? b->prev_draw_frame : b->cur_draw_frame;
+        if (prev && now > prev && now - prev <= 3) return true;
+    }
+    return false;
+}
+static bool draw_is_fullscreen(const CmdRec *r) {
+    if ((uint32_t)r->x[2] > 6) return false;
+    uint32_t tw = 0, th = 0;
+    if (st.rt.ncolor && st.rt.color[0]) { tw = st.rt.color[0]->width; th = st.rt.color[0]->height; }
+    else if (st.rt.depth) { tw = st.rt.depth->width; th = st.rt.depth->height; }
+    return tw && th && st.viewport[0][0] <= 0 && st.viewport[0][1] <= 0 &&
+           st.viewport[0][2] >= (float)tw && st.viewport[0][3] >= (float)th;
+}
+
 static uint64_t prof_tp_;
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
@@ -5736,6 +5914,15 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     { uint32_t m = (uint32_t)r->x[0]; g_draw_gs_in = m == 0 ? 1 : (m <= 3 || m == 0xa || m == 0xb) ? 2 : 3; }  // [XCDE] NVN draw mode -> GS input
     Prog *pr = get_program(st.program, &vkey, &fkey);
+    int skip_mode = pipe_skip_mode();
+    bool can_skip = !xfb && skip_mode > 0 && targets_recent() && (skip_mode >= 2 || !draw_is_fullscreen(r));
+    if (pr && atomic_load(&pr->state) == 0 && can_skip) {
+        promote_job(&tjobs_head, &tjobs_tail, &tjobs_lock, pr);
+        promote_job(&jobs_head, &jobs_tail, &jobs_lock, pr);
+        stat_async_skips++;
+        stat_skipped++;
+        return;
+    }
     uint64_t pr_max = 0;
     // [XC3] the shadow pass's programs (a geometry stage: see the pipeline wait below) are not waited for either: a
     // model whose shadow program is still being built casts no shadow for those frames. A live session waited 45
@@ -5978,21 +6165,23 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     k.topo_class = cls;
     k.poly_fill = st.poly[2] != 1;
-    pipe_key_canon(&k);  // [XCDE] T195
-    uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
+    pipe_key_canon_base(&k);  // [XCDE] T195 (portable canonical state for var_record + dynamic setters)
+    PipeKey pk = k;
+    pipe_key_canon(&pk);      // [XC3] strip state handled dynamically on this GPU
+    uint64_t ph = hash_words(0xcbf29ce484222325ull, &pk, sizeof pk);
     if (!ph) ph = 1;
     HEnt *pslot = htab_slot(&pipe_tab, ph);
     Pipe *pp = pslot->val;
     if (!pp) {
         pp = calloc(1, sizeof *pp);
-        pp->k = k;
+        pp->k = pk;
         pp->t_new = SDL_GetTicksNS();
         if (!pslot->key) pipe_tab.n++;
         pslot->key = ph;
         pslot->val = pp;
         atomic_fetch_add(&pp->jobs, 1);
         run_job(build_pipeline, pp);
-        var_record(st.program, &vkey, &fkey, &k);  // [XCDE] T163
+        var_record(st.program, &vkey, &fkey, &k);  // [XCDE] T163 (portable key)
     }
     else if (atomic_load(&pp->state) == 3) {  // [XCDE] evicted (pipe_evict): built again, from the warm caches
         pp->how &= 0x80;
@@ -6003,6 +6192,13 @@ static void draw_(CmdRec *r, bool indexed) {
         stat_pipe_rebuilt++;
     }
     pp->last_used = renderer_present_count();
+    bool gpl_warm = g_vk.gpl && gpl_ready(gpl_key_pre(&pp->k)) && (!pp->k.prog->fs || gpl_ready(gpl_key_fs(&pp->k)));
+    if (atomic_load(&pp->state) == 0 && can_skip && !gpl_warm) {
+        promote_job(&jobs_head, &jobs_tail, &jobs_lock, pp);
+        stat_async_skips++;
+        stat_skipped++;
+        return;
+    }
     uint64_t pp_max = 0;
     // [XC3] Programs with a geometry stage are XC3's shadow pass (a model's vertex shader with the shared cascade
     // geometry shader): AMD's driver compiled each of these pipelines in 6-9 s at its first draw, and waiting for them
@@ -6016,8 +6212,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     bool pp_ok;
     // [XC3] frame wait budget (wait_budget): a new shader's pipeline whose libraries aren't built yet
-    if (!pp_max && frame_wait_budget() && pp->k.prog->spv_new && atomic_load(&pp->state) == 0 &&
-        !(g_vk.gpl && gpl_ready(gpl_key_pre(&pp->k)) && (!pp->k.prog->fs || gpl_ready(gpl_key_fs(&pp->k))))) {
+    if (!pp_max && frame_wait_budget() && pp->k.prog->spv_new && atomic_load(&pp->state) == 0 && !gpl_warm) {
         pp_ok = pp->gave_up ? wait_ready(&pp->state, pp, 1) : wait_budget(&pp->state, pp);
         if (!pp_ok && !pp->gave_up && atomic_load(&pp->state) == 0) {
             pp->gave_up = 1;
@@ -6051,6 +6246,91 @@ static void draw_(CmdRec *r, bool indexed) {
     if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
+
+    // ---- [XC3] dynamic vertex input & Extended Dynamic State 3
+    if (g_vk.dyn_vi) {
+        bool same_vi = ss.vi_attr_mask == k.attr_mask && ss.vi_used_streams == k.used_streams &&
+                       !memcmp(ss.vi_attr_fmt, k.attr_fmt, sizeof k.attr_fmt) &&
+                       !memcmp(ss.vi_attr_off, k.attr_off, sizeof k.attr_off) &&
+                       !memcmp(ss.vi_attr_bind, k.attr_bind, sizeof k.attr_bind) &&
+                       !memcmp(ss.vi_stride, k.stride, sizeof k.stride) &&
+                       !memcmp(ss.vi_divisor, k.divisor, sizeof k.divisor);
+        if (ss_need(SS_VI, same_vi)) {
+            ss.vi_attr_mask = k.attr_mask; ss.vi_used_streams = k.used_streams;
+            memcpy(ss.vi_attr_fmt, k.attr_fmt, sizeof k.attr_fmt);
+            memcpy(ss.vi_attr_off, k.attr_off, sizeof k.attr_off);
+            memcpy(ss.vi_attr_bind, k.attr_bind, sizeof k.attr_bind);
+            memcpy(ss.vi_stride, k.stride, sizeof k.stride);
+            memcpy(ss.vi_divisor, k.divisor, sizeof k.divisor);
+            VkVertexInputAttributeDescription2EXT va2[32];
+            VkVertexInputBindingDescription2EXT vb2[17];
+            uint32_t na = 0, nb = 0;
+            for (int i = 0; i < 32; i++) {
+                if (!(k.attr_mask & (1u << i))) continue;
+                va2[na++] = (VkVertexInputAttributeDescription2EXT){
+                    .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+                    .location = (uint32_t)i, .binding = k.attr_bind[i], .format = k.attr_fmt[i], .offset = k.attr_off[i]};
+            }
+            for (uint32_t s = 0; s < 17; s++) {
+                if (!(k.used_streams & (1u << s))) continue;
+                bool inst = k.divisor[s] != 0;
+                vb2[nb++] = (VkVertexInputBindingDescription2EXT){
+                    .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+                    .binding = s, .stride = k.stride[s],
+                    .inputRate = inst ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX,
+                    .divisor = inst ? k.divisor[s] : 1};
+            }
+            g_vk.set_vi(cb, nb, vb2, na, va2);
+        }
+    }
+    if (g_vk.dyn_poly) {
+        VkPolygonMode pm = k.poly_fill ? VK_POLYGON_MODE_FILL : VK_POLYGON_MODE_LINE;
+        if (ss_need(SS_POLY, ss.poly_mode == pm)) { ss.poly_mode = pm; g_vk.set_poly(cb, pm); }
+    }
+    if (g_vk.dyn_a2c) {
+        VkBool32 a2c = k.a2c ? VK_TRUE : VK_FALSE;
+        if (ss_need(SS_A2C, ss.a2c == a2c)) { ss.a2c = a2c; g_vk.set_a2c(cb, a2c); }
+    }
+    if (g_vk.dyn_blend_en && g_vk.dyn_blend_eq && k.ncolor > 0) {
+        bool same_bl = ss.blend_ncolor == k.ncolor && ss.blend_on == k.blend_on &&
+                       !memcmp(ss.blend, k.blend, k.ncolor * 8);
+        if (ss_need(SS_BLEND, same_bl)) {
+            ss.blend_ncolor = k.ncolor; ss.blend_on = k.blend_on;
+            memcpy(ss.blend, k.blend, k.ncolor * 8);
+            VkBool32 en[8];
+            VkColorBlendEquationEXT eq[8];
+            for (uint32_t i = 0; i < k.ncolor; i++) {
+                if ((k.blend_on >> i) & 1) {
+                    const uint8_t *b = k.blend[i];
+                    en[i] = VK_TRUE;
+                    eq[i] = (VkColorBlendEquationEXT){
+                        .srcColorBlendFactor = blend_factor(b[1]), .dstColorBlendFactor = blend_factor(b[2]),
+                        .colorBlendOp = blend_op(b[5]),
+                        .srcAlphaBlendFactor = blend_factor(b[3]), .dstAlphaBlendFactor = blend_factor(b[4]),
+                        .alphaBlendOp = blend_op(b[6])};
+                } else {
+                    en[i] = VK_FALSE;
+                    eq[i] = (VkColorBlendEquationEXT){
+                        .srcColorBlendFactor = VK_BLEND_FACTOR_ONE, .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+                        .colorBlendOp = VK_BLEND_OP_ADD,
+                        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+                        .alphaBlendOp = VK_BLEND_OP_ADD};
+                }
+            }
+            g_vk.set_blend_en(cb, 0, k.ncolor, en);
+            g_vk.set_blend_eq(cb, 0, k.ncolor, eq);
+        }
+    }
+    if (g_vk.dyn_wmask && k.ncolor > 0) {
+        uint32_t wm[8];
+        for (uint32_t i = 0; i < k.ncolor; i++) wm[i] = pr->no_fs ? 0 : k.write_mask[i];
+        bool same_wm = ss.wmask_ncolor == k.ncolor && !memcmp(ss.wmask, wm, k.ncolor * sizeof(uint32_t));
+        if (ss_need(SS_WMASK, same_wm)) {
+            ss.wmask_ncolor = k.ncolor;
+            memcpy(ss.wmask, wm, k.ncolor * sizeof(uint32_t));
+            g_vk.set_wmask(cb, 0, k.ncolor, (VkColorComponentFlags *)wm);
+        }
+    }
 
     // ---- depth / stencil (dynamic)
     static int nodt = -1;

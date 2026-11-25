@@ -240,6 +240,18 @@ int main(int argc, char **argv) {
     extern void ui_window_init(void);
     ui_window_init();
 #endif
+    {   // [XC3] Ultrawide: widen the game's resolution table (main+0x14dfd8c) before nn::init::Start reads it.
+        extern void xc3_ultrawide_init(int disp_w, int disp_h);
+        int dw = 0, dh = 0;
+#if defined(XCDE_GFX) && defined(__linux__)
+        extern void ui_display_size(int *w, int *h);
+        ui_display_size(&dw, &dh);
+#elif defined(_WIN32)
+        dw = GetSystemMetrics(SM_CXSCREEN);
+        dh = GetSystemMetrics(SM_CYSCREEN);
+#endif
+        xc3_ultrawide_init(dw, dh);
+    }
     KThread *t = kernel_create_main_thread(start ? start : start3, stack_size, prio);
     if (start3) {
         LOG("[boot] nn::init::Start with three rtld callbacks\n");

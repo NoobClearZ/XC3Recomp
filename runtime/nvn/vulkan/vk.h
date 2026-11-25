@@ -36,6 +36,14 @@ typedef struct {
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, robust2, logic_op, minmax, astc_ldr;
     bool gpl;  // [XCDE] T188: VK_EXT_graphics_pipeline_library with fast linking (exec.c build_pipeline)
+    // [XC3] Dynamic vertex input and Extended Dynamic State 3: collapse pipeline variants differing only in these
+    bool dyn_vi, dyn_poly, dyn_blend_en, dyn_blend_eq, dyn_wmask, dyn_a2c;
+    PFN_vkCmdSetVertexInputEXT set_vi;
+    PFN_vkCmdSetPolygonModeEXT set_poly;
+    PFN_vkCmdSetColorBlendEnableEXT set_blend_en;
+    PFN_vkCmdSetColorBlendEquationEXT set_blend_eq;
+    PFN_vkCmdSetColorWriteMaskEXT set_wmask;
+    PFN_vkCmdSetAlphaToCoverageEnableEXT set_a2c;
     // [XCDE] FSR 3 frame generation's queues (device.c create_device): present, image acquire, async compute; fam UINT32_MAX: none
     VkQueue fg_queue[3];
     uint32_t fg_fam[3], fg_idx[3];
@@ -86,6 +94,7 @@ typedef struct TexBackend {
     bool scene;        // [XC3] a 16:9 target at most half the game's frame size: x output_scale_scene_factor()
     bool presented;
     uint64_t touched_frame, frame_cleared;
+    uint64_t prev_draw_frame, cur_draw_frame;  // [XC3] selective async skip: frames rendered into (present_count + 1)
     uint32_t level_gen;
     float sx, sy;
     void *pending_rgba;  // host-produced pixels (video) waiting to be uploaded on the render thread

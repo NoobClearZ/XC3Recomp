@@ -175,7 +175,13 @@ static void maybe_edit(File *f) {
             extern int kbicons_ard_patches(const char *ard, int style, uint64_t *offs, uint8_t **datas, uint64_t *lens, int max);
             uint64_t o[32], l[32];
             uint8_t *d[32];
-            int n = style >= 0 && kbicons_init() ? kbicons_ard_patches(f->path, style, o, d, l, 31) : 0;
+            int n = style >= 0 && kbicons_init() ? kbicons_ard_patches(f->path, style, o, d, l, 30) : 0;
+            {   // [XC3] Ultrawide battle Arts palette corner anchoring (if kbicons did not already patch mnu417_cont01.wilay)
+                extern int xc3_uw_ard_patch(const char *ard, uint64_t *off, uint8_t **data, uint64_t *len);
+                bool has_hud = false;
+                for (int i = 0; i < n; i++) if (o[i] == 0x23aef9d40ull) has_hud = true;
+                if (!has_hud) n += xc3_uw_ard_patch(f->path, o + n, d + n, l + n);
+            }
             n += xc3_libnx_patch(f->path, o + n, d + n, l + n);
             if (n) {
                 f->patch = calloc((size_t)n, sizeof *f->patch);

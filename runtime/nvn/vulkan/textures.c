@@ -265,7 +265,10 @@ static uint8_t tex_scalable(const NvnTexture *t) {
     if (getenv("LARECOMP_NO_SCALE")) return 0;
     if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return 0;
     float a = (float)t->width / (float)t->height;
-    if (a > 1.74f && a < 1.81f) return 1;
+    int bw, bh;
+    output_scale_base(&bw, &bh);
+    float base_a = bh > 0 ? (float)bw / (float)bh : (16.0f / 9.0f);
+    if (a > base_a * 0.975f && a < base_a * 1.025f) return 1;
     // [XCDE] T182: the menus' character portraits are 3D renders into 192x544 targets (colour, depth, G-buffer; their
     // post chain at 96x272 / 48x136), drawn ~1:1 on the 1280x720 HUD. Left at guest size they were magnified 3x at 4K
     // (stair-stepped hair, soft faces). Same rendering, more pixels: scaled with the output, uniformly (they sit in the

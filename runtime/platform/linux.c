@@ -15,6 +15,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/ucontext.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -110,6 +111,18 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
     int p = prot == PLAT_PROT_NONE ? PROT_NONE : prot == PLAT_PROT_READ ? PROT_READ : PROT_READ | PROT_WRITE;
     return mprotect((void *)(uintptr_t)addr, size, p);
+}
+
+bool plat_mem_readable(uint64_t addr, size_t size) {
+    if (!addr) return false;
+    uint64_t end = addr + (size ? size : 1);
+    pid_t pid = getpid();
+    for (uint64_t a = addr; a < end; a = (a | 4095ull) + 1) {
+        uint8_t byte = 0;
+        struct iovec loc = {&byte, 1}, rem = {(void *)(uintptr_t)a, 1};
+        if (process_vm_readv(pid, &loc, 1, &rem, 1, 0) != 1) return false;
+    }
+    return true;
 }
 
 // ---- time

@@ -926,6 +926,8 @@ NVN(nvnQueuePresentTexture) {
     int i = (int)A(2);
     extern uint64_t backend_queue_present(NvnTexture *t);
     extern bool xc3_frame_present(void);
+    extern void xc3_ui_frame(void);
+    xc3_ui_frame();
     // [XC3] above 30 fps (runtime/hle/framepace.c): the present is held to the limit and the frame step measured here.
     // The game's limiter returns at once then, so its end-of-frame wait for the GPU (the frame lag hook in nvnSyncWait,
     // lr 700124fb70) does not run either: keep both the worker wait and the GPU fence wait here so the CPU never laps

@@ -89,12 +89,12 @@ static int key_from_ini(const char *v) {
 #ifdef _WIN32
 #define GAME_EXE "build/xc3.exe"
 #define GAME_EXE_ALT "build/xcde.exe"
-#define LAUNCHER_EXE "build/xenoblade3_launcher.exe"
+#define LAUNCHER_EXE "xenoblade3_launcher.exe"
 #define VENV_PY ".venv/Scripts/python.exe"
 #else
 #define GAME_EXE "build/xc3"
 #define GAME_EXE_ALT "build/xcde"
-#define LAUNCHER_EXE "build/xenoblade3_launcher"
+#define LAUNCHER_EXE "xenoblade3_launcher"
 #define VENV_PY ".venv/bin/python"
 #endif
 #define DEF_WIN 2             // [XC3] 1920x1080: the size XC3 draws its gameplay frame at (its window crop)
@@ -102,6 +102,8 @@ static int key_from_ini(const char *v) {
 struct Cfg {
     bool fullscreen = false;
     int win = DEF_WIN;      // index into k_wins
+    int aspect = 0;         // [XC3] 0 = 16:9, 1 = auto, 2 = 21:9, 3 = 32:9
+    bool ui_fit = true;     // [XC3] keep 16:9 HUD proportions + edge shift on ultrawide
     int res = 0;            // index into k_res
     int upscaler = 1;       // 0 bilinear, 1 FSR 1, 2 FSR 3.1, 3 DLSS, 4 FSR 4 ([XC3])
     int uquality = 3;       // FSR 3 / DLSS: 0 native AA, 1 quality, 2 balanced, 3 performance, 4 ultra performance
@@ -154,7 +156,9 @@ static int icons_effective(int sel) {
 }
 static const char *const k_ups_ini[] = {"bilinear", "fsr", "fsr3", "dlss", "fsr4"};
 static const char *const k_uq_ini[] = {"native", "quality", "balanced", "performance", "ultra"};
-static const char *const k_wins[] = {"1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160"};
+static const char *const k_wins[] = {"1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160",
+                                     "2560x1080", "3440x1440", "3840x1600", "5120x1440"};
+static const char *const k_aspect_ini[] = {"16:9", "auto", "21:9", "32:9"};
 static const char *const k_res_ini[] = {"match", "1", "2", "3", "75%", "50%", "dynamic"};
 // [XC3] N x the frame the game draws: 1920x1080 in gameplay (Switch docked), 1280x720 on the title screen and in movies
 static const char *const k_res_ui[] = {"Match window (recommended)", "1x - 1080p (like Switch on TV)", "2x - 2160p (4K)",
@@ -469,7 +473,9 @@ static void load() {
         for (char *e = v + strlen(v); e > v && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n'); ) *--e = 0;
         int i;
         if (!strcmp(k, "fullscreen")) g.fullscreen = atoi(v) != 0;
-        else if (!strcmp(k, "window") && (i = find(k_wins, 5, v)) >= 0) g.win = i;
+        else if (!strcmp(k, "window") && (i = find(k_wins, 9, v)) >= 0) g.win = i;
+        else if (!strcmp(k, "aspect") && (i = find(k_aspect_ini, 4, v)) >= 0) g.aspect = i;
+        else if (!strcmp(k, "ui_fit")) g.ui_fit = atoi(v) != 0;
         else if (!strcmp(k, "resolution") && (i = find(k_res_ini, 7, v)) >= 0) g.res = i;
         else if (!strcmp(k, "upscaler")) g.upscaler = !strcmp(v, "fsr") ? 1 : !strcmp(v, "fsr3") ? 2 : !strcmp(v, "dlss") ? 3 : !strcmp(v, "fsr4") ? 4 : 0;
         else if (!strcmp(k, "upscale_quality") && (i = find(k_uq_ini, 5, v)) >= 0) g.uquality = i;
@@ -534,8 +540,9 @@ static bool save() {
     FILE *f = fopen(path(INI_FILE).c_str(), "w");
     if (!f) return false;
     fprintf(f, "# " APP_NAME " settings (written by the launcher)\n");
-    fprintf(f, "fullscreen = %d\nwindow = %s\nresolution = %s\nupscaler = %s\nantialias = %s\nshow_fps = %d\n", g.fullscreen,
-            k_wins[g.win], k_res_ini[g.res], k_ups_ini[g.upscaler], g.smaa ? "smaa" : "off", g.show_fps);
+    fprintf(f, "fullscreen = %d\nwindow = %s\naspect = %s\nui_fit = %d\nresolution = %s\nupscaler = %s\nantialias = %s\nshow_fps = %d\n",
+            g.fullscreen, k_wins[g.win], k_aspect_ini[std::clamp(g.aspect, 0, 3)], g.ui_fit,
+            k_res_ini[g.res], k_ups_ini[g.upscaler], g.smaa ? "smaa" : "off", g.show_fps);
     g.frame_gen = g.cut_fg = false;  // [XC3] not offered (see the upscaler options)
     g.frame_lag = (g.fps != 0);      // [XC3] frame lag above 30 fps
     fprintf(f, "upscale_quality = %s\nframe_gen = %d\n", k_uq_ini[g.uquality], g.frame_gen);
@@ -1343,7 +1350,17 @@ static void tab_graphics() {
     section(T("Pantalla"));
     ImGui::Checkbox(T("Pantalla completa"), &g.fullscreen);
     ImGui::SetNextItemWidth(260 * g_scale);
-    ImGui::Combo(T("Tamaño de la ventana"), &g.win, k_wins, 5);
+    ImGui::Combo(T("Tamaño de la ventana"), &g.win, k_wins, 9);
+    {
+        static const char *const asp_ui[] = {"16:9 (Standard)", "Auto (Match window / display)", "21:9 (Ultrawide)", "32:9 (Super Ultrawide)"};
+        ImGui::SetNextItemWidth(300 * g_scale);
+        ImGui::Combo("Aspect ratio", &g.aspect, asp_ui, 4);
+        ImGui::SetItemTooltip("Native Hor+ ultrawide widens the 3D view.\nAuto matches your display (fullscreen) or window aspect ratio when wider than 16:9.");
+        if (g.aspect != 0) {
+            ImGui::Checkbox("Keep 16:9 HUD proportions (UI fit)", &g.ui_fit);
+            ImGui::SetItemTooltip("Prevents HUD/menus from stretching on ultrawide, anchors side HUD elements to the screen edges,\nand keeps world markers / speech bubbles aligned with 3D targets.");
+        }
+    }
     section(T("Resolución y escalado"));
     ImGui::SetNextItemWidth(360 * g_scale);
     ImGui::Combo(T("Resolución interna"), &g.res, TL(k_res_ui, 7).p, 7);
@@ -1713,7 +1730,7 @@ static std::string find_linux_font(const char *pattern) {
 #endif
 
 int main(int argc, char **argv) {
-    // root: the folder above the launcher's build/ folder (or the working directory)
+    // root: the launcher's folder (or above build/ when started from build/)
     const char *base = SDL_GetBasePath();
     g_root = base ? base : ".";
     while (!g_root.empty() && (g_root.back() == '/' || g_root.back() == '\\')) g_root.pop_back();

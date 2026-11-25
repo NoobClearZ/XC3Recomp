@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build the launcher: build/xenoblade3_launcher(.exe) (SDL3 + Dear ImGui, SDL renderer).
+# Build the launcher: xenoblade3_launcher(.exe) in the repo root (SDL3 + Dear ImGui, SDL renderer).
 cd "$(dirname "$0")/../.."
 . scripts/env.sh
 Z="$XC3_CXX"
 I=third_party/imgui
-OUT=build/xenoblade3_launcher${XC3_EXE_EXT}
+OUT=xenoblade3_launcher${XC3_EXE_EXT}
 mkdir -p build/launcher
 if [ "$XC3_OS" = linux ]; then
   INC="$(pkg-config --cflags sdl3 2>/dev/null || true)"
@@ -25,14 +25,13 @@ for f in $I/imgui.cpp $I/imgui_draw.cpp $I/imgui_tables.cpp $I/imgui_widgets.cpp
   [ "$f" -nt "$o" ] || [ ! -f "$o" ] || continue
   $Z -c $f -o $o -O2 $XC3_ARCH -std=c++17 -I$I -I$I/backends $INC -w || exit 1
 done
-NEW=${OUT}${XC3_EXE_EXT:+.new.exe}
-[ "$XC3_OS" = linux ] && NEW=${OUT}.new
-OLD=${OUT%.exe}.old.exe
-[ "$XC3_OS" = linux ] && OLD=${OUT}.old
+NEW=build/launcher/xenoblade3_launcher.new${XC3_EXE_EXT}
+OLD=build/launcher/xenoblade3_launcher.old${XC3_EXE_EXT}
 $Z -o $NEW build/launcher/*.o $RES $SDL $XC3_ARCH $LINK_EXTRA 2> build/launcher/link.err
 rc=$?; [ $rc = 0 ] || { cat build/launcher/link.err | head -20; exit $rc; }
 rm -f $OLD ${OLD%.exe}.pdb 2>/dev/null
-[ -f $OUT ] && { mv -f $OUT $OLD 2>/dev/null; [ -f ${OUT%.exe}.pdb ] && mv -f ${OUT%.exe}.pdb ${OLD%.exe}.pdb 2>/dev/null; }
+[ -f $OUT ] && mv -f $OUT $OLD 2>/dev/null
 mv -f $NEW $OUT || exit 1
-[ -f ${NEW%.exe}.pdb ] && mv -f ${NEW%.exe}.pdb ${OUT%.exe}.pdb
+[ -f ${NEW%.exe}.pdb ] && mv -f ${NEW%.exe}.pdb build/launcher/xenoblade3_launcher.pdb
+rm -f build/xenoblade3_launcher${XC3_EXE_EXT} 2>/dev/null || true
 exit 0

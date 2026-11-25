@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "nvn.h"
+#include "../hle/ultrawide.h"
 #include "../env_cache.h"  // (last: cached getenv)
 
 #define JUMP_RESERVE (sizeof(CmdRec) + 8)
@@ -182,8 +183,23 @@ NVN(nvnCommandBufferBindVertexBuffer) {
     memcpy(r->extra, &s.x[2], 16);
 }
 // (cmd, stage, first, count, const NVNbufferRange*)
-NVN(nvnCommandBufferBindUniformBuffers) { record_copy(c, CMD_BIND_UNIFORM_BUFFERS, 4, (uint32_t)A(3) * 16); }
+NVN(nvnCommandBufferBindUniformBuffers) {
+    int stage = (int)A(1), first = (int)A(2), count = (int)A(3);
+    const struct { uint64_t address, size; } *rg = (const void *)(uintptr_t)A(4);
+    if (rg && xc3_ui_fit_scale() < 1.0f) {
+        for (int i = 0; i < count; i++) {
+            if (first + i == 1) xc3_ui_note_cam(c, stage, rg[i].address, rg[i].size);
+            if (first + i == 0) xc3_ui_fit(c, stage, rg[i].address, rg[i].size);
+        }
+    }
+    record_copy(c, CMD_BIND_UNIFORM_BUFFERS, 4, (uint32_t)A(3) * 16);
+}
 NVN(nvnCommandBufferBindUniformBuffer) {
+    if (xc3_ui_fit_scale() < 1.0f) {
+        int stage = (int)A(1), idx = (int)A(2);
+        if (idx == 1) xc3_ui_note_cam(c, stage, A(3), A(4));
+        if (idx == 0) xc3_ui_fit(c, stage, A(3), A(4));
+    }
     Snap s = snap(c);
     CmdRec *r = record(c, CMD_BIND_UNIFORM_BUFFERS, 16, &s);
     r->x[0] = s.x[1]; r->x[1] = s.x[2]; r->x[2] = 1;
@@ -261,6 +277,10 @@ NVN(nvnCommandBufferSetRenderTargets) {
         rt.tex[i] = colors && colors[i] ? (uint64_t)(uintptr_t)HOST(NvnTexture, colors[i]) : 0;
         if (views && views[i]) { rt.has_view[i] = 1; nvn_view_from_guest((void *)(uintptr_t)views[i], &rt.views[i]); }
     }
+    {
+        const NvnTexture *t0 = (n > 0 && rt.tex[0]) ? (const NvnTexture *)(uintptr_t)rt.tex[0] : NULL;
+        xc3_ui_note_target(t0 ? t0->width : 0, t0 ? t0->height : 0);
+    }
     rt.depth = s.x[4] ? (uint64_t)(uintptr_t)HOST(NvnTexture, s.x[4]) : 0;
     if (s.x[5]) { rt.has_dview = 1; nvn_view_from_guest((void *)(uintptr_t)s.x[5], &rt.dview); }
     CmdRec *r = record(c, CMD_SET_RENDER_TARGETS, sizeof rt, &s);
@@ -269,19 +289,45 @@ NVN(nvnCommandBufferSetRenderTargets) {
 }
 
 // viewports/scissors/depth ranges
-NVN(nvnCommandBufferSetViewports) { record_copy(c, CMD_SET_VIEWPORTS, 3, (uint32_t)A(2) * 16); }
+NVN(nvnCommandBufferSetViewports) {
+    uint32_t count = (uint32_t)A(2);
+    CmdRec *r = record_copy(c, CMD_SET_VIEWPORTS, 3, count * 16);
+    if (xc3_ui_fit_scale() < 1.0f) {
+        float *vp = (float *)r->extra;
+        for (uint32_t i = 0; i < count; i++) xc3_ui_rect(c, vp + i * 4, 1);
+    }
+}
 NVN(nvnCommandBufferSetViewport) {
     Snap s = snap(c);
-    CmdRec *r = record(c, CMD_SET_VIEWPORTS, 16, &s);
     float v[4] = {(float)(int32_t)s.x[1], (float)(int32_t)s.x[2], (float)(int32_t)s.x[3], (float)(int32_t)s.x[4]};
+    xc3_ui_rect(c, v, 1);
+    CmdRec *r = record(c, CMD_SET_VIEWPORTS, 16, &s);
     r->x[0] = 0; r->x[1] = 1;
     memcpy(r->extra, v, 16);
 }
-NVN(nvnCommandBufferSetScissors) { record_copy(c, CMD_SET_SCISSORS, 3, (uint32_t)A(2) * 16); }
+NVN(nvnCommandBufferSetScissors) {
+    uint32_t count = (uint32_t)A(2);
+    CmdRec *r = record_copy(c, CMD_SET_SCISSORS, 3, count * 16);
+    if (xc3_ui_fit_scale() < 1.0f) {
+        int32_t *sc = (int32_t *)r->extra;
+        for (uint32_t i = 0; i < count; i++) {
+            float f[4] = {(float)sc[i * 4 + 0], (float)sc[i * 4 + 1], (float)sc[i * 4 + 2], (float)sc[i * 4 + 3]};
+            xc3_ui_rect(c, f, 0);
+            sc[i * 4 + 0] = (int32_t)f[0];
+            sc[i * 4 + 2] = (int32_t)f[2];
+        }
+    }
+}
 NVN(nvnCommandBufferSetScissor) {
     Snap s = snap(c);
-    CmdRec *r = record(c, CMD_SET_SCISSORS, 16, &s);
     int32_t v[4] = {(int32_t)s.x[1], (int32_t)s.x[2], (int32_t)s.x[3], (int32_t)s.x[4]};
+    if (xc3_ui_fit_scale() < 1.0f) {
+        float f[4] = {(float)v[0], (float)v[1], (float)v[2], (float)v[3]};
+        xc3_ui_rect(c, f, 0);
+        v[0] = (int32_t)f[0];
+        v[2] = (int32_t)f[2];
+    }
+    CmdRec *r = record(c, CMD_SET_SCISSORS, 16, &s);
     r->x[0] = 0; r->x[1] = 1;
     memcpy(r->extra, v, 16);
 }

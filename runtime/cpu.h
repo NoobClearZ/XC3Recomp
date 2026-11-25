@@ -35,6 +35,15 @@ extern volatile int32_t xc3_rt_fps;            // the frame rate the step makes,
 extern volatile float xc3_rt_step, xc3_rt_ratio;   // the step in seconds / in 30 fps frames
 extern volatile uint64_t xc3_rt_obj;           // the frame-step update's object (its +0x1fc bit 2: a fixed step)
 
+// [XC3] ultrawide (runtime/hle/ultrawide.c), read by the patched sites of games/xc3/patches.py
+extern volatile int xc3_uw_on, xc3_uifit_on;   // resolution table widened / world-to-UI X spread
+extern volatile float xc3_uifit_inv;           // 1 / xc3_ui_fit_scale()
+extern uint32_t xc3_ui_canvas[2];              // shipped 1280x720 canvas for the layout manager
+
+// [XC3] LOD / draw-distance scaling (runtime/host/settings_ini.c), read by the patched sites of games/xc3/patches.py
+extern volatile int xc3_lod_on, xc3_lod_grass_dirty;
+extern volatile float xc3_lod_scale, xc3_lod_scale_sq, xc3_grass_scale;
+
 // ---- runtime services (runtime/*.c)
 void rt_dispatch(Cpu *c);                 // call function at c->pc
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);

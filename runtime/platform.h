@@ -42,6 +42,7 @@ void plat_pmem_set_dmabuf_alloc(PlatPmemDmabufFn fn);
 #endif
 enum { PLAT_PROT_NONE = 0, PLAT_PROT_READ = 1, PLAT_PROT_RW = 3 };
 int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
+bool plat_mem_readable(uint64_t addr, size_t size);        // true when every page in [addr, addr+size) can be read without faulting
 #define PLAT_PAGE 0x4000ull  // largest page size we deal with (macOS 16K; multiple of Windows' 4K)
 
 // ---- time

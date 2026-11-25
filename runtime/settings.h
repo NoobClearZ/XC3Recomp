@@ -2,7 +2,8 @@
 #pragma once
 #include <stdbool.h>
 
-enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
+enum { ASPECT_16_9 = 0, ASPECT_AUTO = 1, ASPECT_21_9 = 2, ASPECT_32_9 = 3,
+       ASPECT_UNLOCKED = ASPECT_AUTO, ASPECT_ORIGINAL = ASPECT_16_9 };
 enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12 };
 // (11 was 67% of the display: larecomp.ini "67%" now loads as RES_Q75)
 enum { UPSCALE_BILINEAR = 0, UPSCALE_METALFX = 1 /* macOS */, UPSCALE_FSR1 = 2 /* Windows: AMD FSR 1 */,
@@ -78,7 +79,9 @@ typedef struct {
     int ui_lang;         // [XC3] launcher and F1-menu language: permanently 1 (English)
     int stick_deadzone;  // [XCDE] % of the stick's travel read as centred (xcde.ini stick_deadzone = 0-30, default 0: raw)
     bool dlc_off;        // [XC3] hide the add-on content in <dump>/dlcs from the game (xc3.ini dlc = 0; default 1: served if present)
+    bool ui_fit_off;     // [XC3] keep stretched UI on ultrawide (xc3.ini ui_fit = 0; default 1: 16:9 UI fit + edge shift)
     int cutscene_mode;   // [XCDE] T224: 0 cutscenes at the FPS setting, 1 at 30, 2 at 30 + FSR 3 frame generation (xcde.ini cutscenes = same|30|30fg)
+    float lod_scale;     // [XC3] LOD & draw-distance multiplier (xc3.ini lod_scale = 1.0..4.0, default 1.0)
 } Settings;
 
 enum { N_TUNIC_COLOURS = 13, N_HEART_COLOURS = 9 };
@@ -90,6 +93,7 @@ extern int g_window_w, g_window_h;  // [XCDE] windowed size (xcde.ini "window = 
 
 void settings_load(void);
 void settings_save(void);
+void settings_apply_lod(void);
 // The language code to serve the game ("es", "en-US", ...): the setting, or the host locale for LANG_AUTO
 const char *settings_language(void);
 // That code's name for the menu ("Spanish")

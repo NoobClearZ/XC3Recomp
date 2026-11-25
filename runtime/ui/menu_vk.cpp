@@ -204,6 +204,13 @@ static void ui(void) {
         if (ImGui::BeginTabItem("Graphics")) {
             ImGui::SeparatorText("Display");
             if (ImGui::Checkbox("Fullscreen", &g_settings.fullscreen)) want_window = true;
+            static const char *asp_ui[] = {"16:9 (Standard)", "Auto (Match window / display)", "21:9 (Ultrawide)", "32:9 (Super Ultrawide)"};
+            if (g_settings.aspect < 0 || g_settings.aspect > 3) g_settings.aspect = 0;
+            ImGui::Combo("Aspect ratio (after restart)", &g_settings.aspect, asp_ui, 4);
+            if (g_settings.aspect != ASPECT_16_9) {
+                bool uifit = !g_settings.ui_fit_off;
+                if (ImGui::Checkbox("Keep 16:9 HUD proportions (after restart)", &uifit)) g_settings.ui_fit_off = !uifit;
+            }
             ImGui::SeparatorText("Resolution and scaling");
             int ri = 0;
             for (int i = 0; i < 7; i++) if (k_res_mode[i] == g_settings.res_mode) ri = i;
@@ -263,6 +270,14 @@ static void ui(void) {
             for (int i = 0; i < 5; i++) if (aniso_vals[i] == g_settings.anisotropy) ai = i;
             if (ImGui::Combo("Anisotropic filtering (AF)", &ai, aniso_names, 5)) {
                 g_settings.anisotropy = aniso_vals[ai];
+            }
+            static const char *lod_names[] = {"1.0x (Switch default)", "1.5x", "2.0x", "2.5x", "3.0x", "4.0x"};
+            static const float lod_vals[] = {1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f};
+            int li = 0;
+            for (int i = 0; i < 6; i++) if (fabsf(lod_vals[i] - g_settings.lod_scale) < 0.05f) li = i;
+            if (ImGui::Combo("Draw distance / LOD", &li, lod_names, 6)) {
+                g_settings.lod_scale = lod_vals[li];
+                settings_apply_lod();
             }
             static const char *vs_names[] = {"V-Sync ON (FIFO)", "Fast Sync (Mailbox)", "V-Sync OFF / VRR (Immediate)"};
             int vsi = g_settings.present_mode >= 0 && g_settings.present_mode <= 2 ? g_settings.present_mode : (!g_settings.vsync ? 2 : 0);

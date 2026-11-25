@@ -11,8 +11,32 @@
 const char *const g_language_codes[N_LANGUAGES] = {"", "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-Hans", "zh-Hant"};
 const char *const g_language_names[N_LANGUAGES] = {"Auto", "Japanese", "English", "French", "German", "Italian", "Spanish",
                                                    "Chinese", "Korean", "Dutch", "Portuguese", "Russian", "Chinese (Simplified)", "Chinese (Traditional)"};
-Settings g_settings = {.fps = 30, .volume = 1.0f, .movie_audio = true, .res_mode = RES_MATCH, .upscaler = UPSCALE_BILINEAR, .upscale_quality = UQ_PERFORMANCE /* [XC3] the game's own render size */, .game_blur = true, .motion_blur = true, .game_taa = true, .vsync = true, .frame_lag = true, .ui_lang = 1};
+Settings g_settings = {.fps = 30, .volume = 1.0f, .movie_audio = true, .res_mode = RES_MATCH, .upscaler = UPSCALE_BILINEAR, .upscale_quality = UQ_PERFORMANCE /* [XC3] the game's own render size */, .game_blur = true, .motion_blur = true, .game_taa = true, .vsync = true, .frame_lag = true, .ui_lang = 1, .lod_scale = 1.0f};
 int g_window_w = 1280, g_window_h = 720;  // windowed size (settings.h)
+
+// [XC3] LOD / draw-distance globals read by the patched sites in games/xc3/patches.py (declared in runtime/cpu.h).
+volatile int xc3_lod_on = 0, xc3_lod_grass_dirty = 0;
+volatile float xc3_lod_scale = 1.0f, xc3_lod_scale_sq = 1.0f, xc3_grass_scale = 1.0f;
+
+void settings_apply_lod(void) {
+    float s = g_settings.lod_scale;
+    const char *env = getenv("XC3_LOD_SCALE");
+    if (env && *env) s = (float)atof(env);
+    if (s < 0.5f || s > 4.0f) s = (s > 4.0f) ? 4.0f : 1.0f;
+    // Procedural grass grows O(r^2) in active cells and shares a fixed 0x2c0000 cell pool + 0x30000 draw-list bump arena
+    // (main_326.c f_7000f406a0); cap its radius multiplier at 2.5x (6.25x area) to prevent arena overflow at 3x-4x LOD.
+    float gs = (s > 2.5f) ? 2.5f : s;
+    xc3_lod_scale = s;
+    xc3_lod_scale_sq = s * s;
+    xc3_grass_scale = gs;
+    xc3_lod_on = (s > 1.01f || s < 0.99f) ? 1 : 0;
+    static float last_logged = -1.0f;
+    if (last_logged != s) {
+        if (last_logged >= 0.0f) xc3_lod_grass_dirty = 64;  // live menu change: force grass grid rebuild while standing still
+        last_logged = s;
+        fprintf(stderr, "[lod] scale=%.2fx grass=%.2fx (%s)\n", (double)s, (double)gs, xc3_lod_on ? "on" : "default");
+    }
+}
 
 // [XCDE] Mods (runtime/services/romfs_virtual.c): xcde.ini `mod_<folder> = 0/1`; a folder not listed is on.
 bool g_party_switch;  // [XCDE] party mod: xcde.ini party_switch = 0/1 (off by default; runtime/hle/party.c)
@@ -54,9 +78,12 @@ void settings_load(void) {
     // test runs (hidden window, deterministic, scripted input) ignore the player's settings unless XC3_INI/XCDE_INI names a file
     if (!getenv("XC3_INI") && !getenv("XCDE_INI") &&
         (getenv("LARECOMP_HIDDEN") || getenv("XC3_DETERMINISTIC") || getenv("XCDE_DETERMINISTIC") ||
-         getenv("XC3_INPUT_REPLAY") || getenv("XCDE_INPUT_REPLAY"))) return;
+         getenv("XC3_INPUT_REPLAY") || getenv("XCDE_INPUT_REPLAY"))) {
+        settings_apply_lod();
+        return;
+    }
     FILE *f = fopen(ini_path(), "r");
-    if (!f) return;
+    if (!f) { settings_apply_lod(); return; }
     char line[512];
     while (fgets(line, sizeof line, f)) {
         char *s = line;
@@ -69,6 +96,10 @@ void settings_load(void) {
         char *k = trim(s), *v = trim(eq + 1);
         if (!strcmp(k, "fullscreen")) g_settings.fullscreen = atoi(v) != 0;
         else if (!strcmp(k, "window")) sscanf(v, "%dx%d", &g_window_w, &g_window_h);
+        else if (!strcmp(k, "aspect")) {
+            g_settings.aspect = !strcmp(v, "auto") ? ASPECT_AUTO : !strcmp(v, "21:9") ? ASPECT_21_9
+                              : !strcmp(v, "32:9") ? ASPECT_32_9 : ASPECT_16_9;
+        } else if (!strcmp(k, "ui_fit")) g_settings.ui_fit_off = atoi(v) == 0;
         else if (!strcmp(k, "resolution")) {  // match | 1x..4x | 75% | 50% | 25% | dynamic
             if (!strcmp(v, "match")) g_settings.res_mode = RES_MATCH;
             else if (!strcmp(v, "dynamic")) g_settings.res_mode = RES_DYNAMIC;
@@ -111,6 +142,9 @@ void settings_load(void) {
         } else if (!strcmp(k, "anisotropy")) {
             int a = atoi(v);
             g_settings.anisotropy = a >= 16 ? 16 : a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 0;
+        } else if (!strcmp(k, "lod_scale")) {
+            float s = (float)atof(v);
+            g_settings.lod_scale = (s < 0.5f) ? 1.0f : (s > 4.0f) ? 4.0f : s;
         } else if (!strcmp(k, "astc_decoder")) {
             if (!strcmp(v, "cpu") || !strcmp(v, "software") || !strcmp(v, "1")) g_settings.astc_mode = 1;
             else g_settings.astc_mode = 0;
@@ -134,6 +168,7 @@ void settings_load(void) {
     if (g_window_h < 180) g_window_h = 180;
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
+    settings_apply_lod();
 }
 
 void settings_save(void) {
@@ -141,8 +176,10 @@ void settings_save(void) {
     if (!f) return;
     g_settings.frame_lag = (g_settings.fps != 30);  // [XC3] above 30 fps
     static const char *res[] = {"match", "1", "2", "3", "4", "5", "6", "7", "8", "dynamic", "75%", "25%", "50%"};
+    static const char *asp[] = {"16:9", "auto", "21:9", "32:9"};
     fprintf(f, "# XC3Recomp settings (the launcher writes this file)\n");
     fprintf(f, "fullscreen = %d\nwindow = %dx%d\n", g_settings.fullscreen, g_window_w, g_window_h);
+    fprintf(f, "aspect = %s\nui_fit = %d\n", asp[g_settings.aspect >= 0 && g_settings.aspect <= 3 ? g_settings.aspect : 0], !g_settings.ui_fit_off);
     fprintf(f, "resolution = %s\n", g_settings.res_mode >= 0 && g_settings.res_mode <= 12 ? res[g_settings.res_mode] : "match");
     static const char *up[] = {"bilinear", "bilinear", "fsr", "fsr3", "dlss", "fsr4"};
     static const char *uq[] = {"native", "quality", "balanced", "performance", "ultra"};
@@ -154,6 +191,7 @@ void settings_save(void) {
     fprintf(f, "motion_blur = %d\ngame_taa = %d\n", g_settings.motion_blur, g_settings.game_taa);  // [XC3] (were game_blur)
     fprintf(f, "dlc = %d\n", !g_settings.dlc_off);
     if (g_settings.anisotropy) fprintf(f, "anisotropy = %d\n", g_settings.anisotropy);
+    if (g_settings.lod_scale > 1.01f || g_settings.lod_scale < 0.99f) fprintf(f, "lod_scale = %.2f\n", (double)g_settings.lod_scale);
     if (g_settings.astc_mode) fprintf(f, "astc_decoder = cpu\n");
     if (g_settings.present_mode == 2) fprintf(f, "vsync = immediate\n");
     else if (g_settings.present_mode == 1) fprintf(f, "vsync = mailbox\n");

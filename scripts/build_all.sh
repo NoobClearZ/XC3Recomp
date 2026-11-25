@@ -21,7 +21,7 @@ step "4/5 Compiling the runtime and linking $exe"
 scripts/build_rt_gfx.sh
 [ -f "$exe" ] || { echo "the link failed (see build/link_gfx.err)"; exit 1; }
 scripts/copy_upscaler_dlls.sh  # (FSR DLLs from third_party/fidelityfx; DLSS only with sdk/)
-launcher=build/xenoblade3_launcher${XC3_EXE_EXT}
+launcher=xenoblade3_launcher${XC3_EXE_EXT}
 play="Play XC3.bat"; [ "$XC3_OS" = linux ] && play="scripts/play.sh"
 step "5/5 Building the launcher ($launcher)"
 tools/launcher/build.sh

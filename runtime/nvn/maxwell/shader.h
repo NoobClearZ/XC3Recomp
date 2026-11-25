@@ -72,6 +72,9 @@ typedef struct {
 typedef struct {
     int stage;
     char *msl;              // complete MSL or GLSL source (MSL entry "main0", GLSL "main"); NULL on failure
+    uint32_t *spv;          // [XC3] direct Maxwell -> SPIR-V binary (bypasses GLSL/shaderc when non-NULL)
+    size_t spv_words;       // number of 32-bit SPIR-V words in spv
+    bool uses_vid;          // vertex shader reads gl_VertexIndex (attr 0x2FC)
     uint32_t cbuf_mask;     // hardware constant buffers read
     uint32_t cbuf_size[18];
     uint32_t cbuf_dynamic;  // cbufs indexed with a register: bind the whole buffer
@@ -128,6 +131,8 @@ extern const uint8_t *maxwell_dbg_vs;
 // code: shader binary (with the 0x50-byte SPH header for graphics stages)
 // const_size: the compiler constants at code + max_size (c[1]; 0 when unknown), read for BRX jump tables [XC3]
 ShaderInfo *maxwell_translate(const uint8_t *code, size_t max_size, size_t const_size, int stage, const ShaderKey *key);
+// [XC3] Direct Maxwell -> SPIR-V translation (returns NULL to fall back to GLSL + shaderc).
+ShaderInfo *maxwell_translate_spirv(const uint8_t *code, size_t max_size, size_t const_size, int stage, const ShaderKey *key);
 void maxwell_free(ShaderInfo *s);
 // Disassemble for debugging (writes text to f).
 void maxwell_disassemble(const uint8_t *code, size_t max_size, int stage, void *file);

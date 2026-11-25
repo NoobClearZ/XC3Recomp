@@ -234,6 +234,35 @@ static void create_device(void) {
     }
     if (gpl) { ext[n_ext++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME; ext[n_ext++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME; }
     g_vk.gpl = gpl;
+    // [XC3] Dynamic vertex input + Extended Dynamic State 3: moves vertex layout, polygon mode, blend state, color
+    // write mask and alpha-to-coverage out of the pipeline key so fewer pipelines and GPL pieces need compilation.
+    bool dyn_vi = has_ext(ep, ne, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+    { const char *e = getenv("XC3_DYN_VI"); if (e && !atoi(e)) dyn_vi = false; }
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vihave = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
+    if (dyn_vi) {
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &vihave};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        dyn_vi = vihave.vertexInputDynamicState != VK_FALSE;
+    }
+    if (dyn_vi) ext[n_ext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
+
+    bool dyn_eds3_ext = has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
+    { const char *e = getenv("XC3_DYN_EDS3"); if (e && !atoi(e)) dyn_eds3_ext = false; }
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT e3have = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+    bool dyn_poly = false, dyn_blend_en = false, dyn_blend_eq = false, dyn_wmask = false, dyn_a2c = false;
+    if (dyn_eds3_ext) {
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &e3have};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        dyn_poly = e3have.extendedDynamicState3PolygonMode != VK_FALSE;
+        dyn_blend_en = e3have.extendedDynamicState3ColorBlendEnable != VK_FALSE;
+        dyn_blend_eq = e3have.extendedDynamicState3ColorBlendEquation != VK_FALSE;
+        dyn_wmask = e3have.extendedDynamicState3ColorWriteMask != VK_FALSE;
+        dyn_a2c = e3have.extendedDynamicState3AlphaToCoverageEnable != VK_FALSE;
+        dyn_eds3_ext = dyn_poly || (dyn_blend_en && dyn_blend_eq) || dyn_wmask || dyn_a2c;
+    }
+    if (dyn_eds3_ext) ext[n_ext++] = VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME;
     // [XC3] FSR 4 / FSR 3.1 compute shaders use compute shader derivatives where supported
     bool comp_deriv = has_ext(ep, ne, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
     if (comp_deriv) ext[n_ext++] = VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME;
@@ -290,6 +319,18 @@ static void create_device(void) {
     if (g_vk.robust2) { r2.pNext = fault ? (void *)&ff : (void *)&f11; }
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
                                    .pNext = g_vk.robust2 ? (void *)&r2 : fault ? (void *)&ff : (void *)&f11};
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vif = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT,
+        .vertexInputDynamicState = VK_TRUE};
+    if (dyn_vi) { vif.pNext = f.pNext; f.pNext = &vif; }
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT e3f = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
+        .extendedDynamicState3PolygonMode = dyn_poly ? VK_TRUE : VK_FALSE,
+        .extendedDynamicState3ColorBlendEnable = (dyn_blend_en && dyn_blend_eq) ? VK_TRUE : VK_FALSE,
+        .extendedDynamicState3ColorBlendEquation = (dyn_blend_en && dyn_blend_eq) ? VK_TRUE : VK_FALSE,
+        .extendedDynamicState3ColorWriteMask = dyn_wmask ? VK_TRUE : VK_FALSE,
+        .extendedDynamicState3AlphaToCoverageEnable = dyn_a2c ? VK_TRUE : VK_FALSE};
+    if (dyn_eds3_ext) { e3f.pNext = f.pNext; f.pNext = &e3f; }
     LOG("[vk] robustBufferAccess2: %s\n", g_vk.robust2 ? "on" : "not available");
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
@@ -379,6 +420,26 @@ static void create_device(void) {
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = nqi,
                              .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
+    if (dyn_vi) {
+        g_vk.set_vi = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetVertexInputEXT");
+        g_vk.dyn_vi = g_vk.set_vi != NULL;
+    }
+    if (dyn_eds3_ext) {
+        if (dyn_poly) g_vk.set_poly = (PFN_vkCmdSetPolygonModeEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetPolygonModeEXT");
+        if (dyn_blend_en && dyn_blend_eq) {
+            g_vk.set_blend_en = (PFN_vkCmdSetColorBlendEnableEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetColorBlendEnableEXT");
+            g_vk.set_blend_eq = (PFN_vkCmdSetColorBlendEquationEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetColorBlendEquationEXT");
+        }
+        if (dyn_wmask) g_vk.set_wmask = (PFN_vkCmdSetColorWriteMaskEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetColorWriteMaskEXT");
+        if (dyn_a2c) g_vk.set_a2c = (PFN_vkCmdSetAlphaToCoverageEnableEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetAlphaToCoverageEnableEXT");
+        g_vk.dyn_poly = g_vk.set_poly != NULL;
+        g_vk.dyn_blend_en = g_vk.set_blend_en != NULL && g_vk.set_blend_eq != NULL;
+        g_vk.dyn_blend_eq = g_vk.dyn_blend_en;
+        g_vk.dyn_wmask = g_vk.set_wmask != NULL;
+        g_vk.dyn_a2c = g_vk.set_a2c != NULL;
+    }
+    LOG("[vk] dynamic state: vertex_input=%d poly=%d blend=%d wmask=%d a2c=%d\n",
+        (int)g_vk.dyn_vi, (int)g_vk.dyn_poly, (int)(g_vk.dyn_blend_en && g_vk.dyn_blend_eq), (int)g_vk.dyn_wmask, (int)g_vk.dyn_a2c);
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
     for (int k = 0; k < 3; k++)
         if (g_vk.fg_fam[k] != UINT32_MAX) vkGetDeviceQueue(g_vk.dev, g_vk.fg_fam[k], g_vk.fg_idx[k], &g_vk.fg_queue[k]);
@@ -1432,6 +1493,19 @@ void ui_window_init(void) {
 }
 
 SDL_Window *ui_window(void) { return window; }
+
+void ui_display_size(int *w, int *h) {
+    SDL_DisplayID id = window ? SDL_GetDisplayForWindow(window) : 0;
+    if (!id) id = SDL_GetPrimaryDisplay();
+    const SDL_DisplayMode *dm = id ? SDL_GetDesktopDisplayMode(id) : NULL;
+    if (dm && dm->w > 0 && dm->h > 0) {
+        if (w) *w = dm->w;
+        if (h) *h = dm->h;
+        return;
+    }
+    if (w) *w = (int)g_vk.sc_extent.width;
+    if (h) *h = (int)g_vk.sc_extent.height;
+}
 
 void backend_init(void) {
     while (!atomic_load(&ui_ready)) SDL_Delay(1);

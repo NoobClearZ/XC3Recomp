@@ -5,14 +5,14 @@
 > documentation was written by an AI (Anthropic's Claude, through Claude Code), directed, tested and reviewed by a
 > human. It is shared as is, in the hope that someone takes it further. You run it at your own discretion.
 
-**XC3Recomp** is a static recompilation of *Xenoblade Chronicles 3* (Nintendo Switch, 2022) into a native Windows
-x86-64 application with a Vulkan renderer. It is **not an emulator**: the game's ARM64 code is translated ahead of
+**XC3Recomp** is a static recompilation of *Xenoblade Chronicles 3* (Nintendo Switch, 2022) into a native Windows and
+Linux x86-64 application with a Vulkan renderer. It is **not an emulator**: the game's ARM64 code is translated ahead of
 time into C and compiled natively for your PC, and the console's operating system and graphics API (NVN) are
-reimplemented on top of Windows and Vulkan.
+reimplemented on top of Windows / Linux and Vulkan.
 
 It evolves from **Monado** (the static recompilation of *Xenoblade Chronicles: Definitive Edition*) and
 [LASRecomp](https://github.com/peiikai/LASRecomp) (MIT), adapting their generator and dedicated runtime. User-facing
-tooling and configuration are specialized for XC3 (`Build XC3.bat`, `Play XC3.bat`, `build/xenoblade3_launcher.exe`,
+tooling and configuration are specialized for XC3 (`Build XC3.bat`, `Play XC3.bat`, `xenoblade3_launcher.exe`,
 `build/xc3.exe`, `xc3.ini`). XC3 is the only game built: the XCDE profile and its code paths were removed (2026-11-06);
 the `XCDE_*` environment switches and `[XCDE]` comment markers keep their names (where the code came from).
 
@@ -25,20 +25,22 @@ the `XCDE_*` environment switches and `[XCDE]` comment markers keep their names 
 ## Status
 
 The project is currently in active development (**Phases 1 & 2** of the [Roadmap](docs/ROADMAP.md)):
-- **Playable areas:** The opening sequence, title screen, early cutscenes, and Colony 9 are running with full audio, video playback, and controls on Windows (tested on NVIDIA RTX and AMD GPUs). An automated map-jump tour (`tools/xc3_tour.py`) visits the game's fast-travel points: the first five field maps have been reached without a crash so far, the rest is being toured.
-- **Performance & graphics features:** In-place alias memory pool reads, multi-threaded Zstd-compressed SPIR-V shader cache reads, automatic ASTC GPU compute shader decoding, transform feedback draw support (`nvnCommandBufferDrawTransformFeedback`), GPU queue sync (`CMD_WAIT_SYNC`), shadow-pass async builds, forced 16x anisotropic filtering, and 60 FPS and above (real-time frame step) with a frame-lag reduction option.
+- **Playable areas:** The opening sequence, title screen, early cutscenes, and Colony 9 are running with full audio, video playback, and controls on Windows and Linux (tested on NVIDIA RTX and AMD Radeon GPUs). An automated map-jump tour (`tools/xc3_tour.py`) visits the game's fast-travel points: the first five field maps have been reached without a crash so far, the rest is being toured.
+- **Performance & graphics features:** In-place alias memory pool reads, direct Maxwell-to-SPIR-V shader translation (~99% of shaders bypass GLSL/shaderc) with Vulkan Graphics Pipeline Library (GPL) fast linking and background optimization, multi-threaded Zstd-compressed SPIR-V shader cache reads, automatic ASTC GPU compute shader decoding, transform feedback draw support (`nvnCommandBufferDrawTransformFeedback`), GPU queue sync (`CMD_WAIT_SYNC`), shadow-pass async builds, forced 16x anisotropic filtering, native Hor+ ultrawide (21:9 / 32:9), live draw distance / LOD & grass radius scaling (1.0x–4.0x), and 60 FPS and above (real-time frame step) with a frame-lag reduction option.
 - **Under active work:** Testing gameplay stability and visual accuracy across later regions and extended battles. See [Known issues](#known-issues) and [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Features
 
 **Graphics**
-- Internal resolution: match the window (default), 1x–3x the Switch's resolution (up to 4K), 75 % / 50 % of the window, or dynamic resolution following performance. Ultrawide displays maintain correct aspect ratios.
+- Internal resolution: match the window (default), 1x–3x the Switch's resolution (up to 4K), 75 % / 50 % of the window, or dynamic resolution following performance.
+- Ultrawide support: native Hor+ 21:9, 32:9, or auto-match display/window aspect ratio (`aspect`) with 16:9 HUD aspect fitting, edge-anchored HUD shifting, corner-anchored battle Arts palettes (`mnu417_cont01.wilay`), rotation-invariant anchoring for spinning HUD icons (loading ring, minimap compass), and world-projected marker alignment (`ui_fit`, adapted from [xc3-recomp](https://github.com/jmars125/xc3-recomp), MIT).
+- Draw distance / LOD scaling (`lod_scale`, 1.0x–4.0x, adjustable live in **F1 → Graphics** without restarting): scales dynamic object LODs, static map object BVH & per-object LOD/fade distances (rocks, trees, buildings, props), instanced foliage/clutter BVH, and the procedural grass grid spawn radius (capped safely at 2.5x radius / 6.25x area with instant live grid refresh).
 - Upscaling and anti-aliasing:
   - Spatial: AMD FSR 1.0;
   - Temporal: AMD FSR 3.1 / FSR 4 or NVIDIA DLSS (with native-AA / DLAA modes);
   - Extra: SMAA (automatically bypassed when temporal upscalers like FSR/DLSS are active).
 - The game's own motion blur and temporal anti-aliasing (TMAA) can each be turned off (launcher: Graphics; `motion_blur` / `game_taa`). TMAA stays on with FSR 3.1 / FSR 4 / DLSS, which take their inputs from it.
-- Shader precompilation: Ahead-of-time pipeline building to eliminate in-game shader compilation stutters. The SPIR-V cache is packed into `cache/spirv.pack`.
+- Shader compilation & precompilation: Direct Maxwell-to-SPIR-V emission (~99% of shaders bypass GLSL/shaderc) paired with Vulkan Graphics Pipeline Library (GPL) fast pipeline linking and background optimization to minimize cold shader stutter, plus ahead-of-time shader precompilation packed into `cache/spirv.pack`.
 
 **Frame rate**
 - 30 / 60 / 120 / 144 / 165 FPS or unlimited. Above 30 the game steps its world by the time each frame is actually
@@ -64,7 +66,7 @@ The project is currently in active development (**Phases 1 & 2** of the [Roadmap
 - **Hardware-aware scaling:** Detects CPU core counts and GPU capabilities, tuning thread pools and memory budgets accordingly.
 
 **Launcher & Setup**
-- **Xenoblade Chronicles 3 Launcher** (`build/xenoblade3_launcher.exe`): modern dark theme, dedicated tabs for graphics, controls, and an "Install & build" tab with game file picker, version validation, and single-click builds.
+- **Xenoblade Chronicles 3 Launcher** (`xenoblade3_launcher.exe` / `xenoblade3_launcher`): modern dark theme, dedicated tabs for graphics, controls, and an "Install & build" tab with game file picker, version validation, and single-click builds.
 - Romfs mod support via `mods/<name>/romfs/`.
 
 ## Requirements
@@ -130,7 +132,7 @@ The build runs the recompiler on your machine to translate the game's code, then
 ### The easiest way: the release zip
 
 Download `XC3Recomp-<version>.zip` from the repository's **Releases** page and extract it. Start
-`build\xenoblade3_launcher.exe` and go through its **Install & build** tab (described below): build tools, game files,
+`xenoblade3_launcher.exe` and go through its **Install & build** tab (described below): build tools, game files,
 build, shaders. The zip has the source and a prebuilt launcher only - no game files; your own 2.2.0 or 2.2.1 dump is still
 needed.
 
@@ -142,7 +144,7 @@ bash runs the build scripts.
 Run `Build XC3.bat` from the repository root:
 1. **Tools:** If tools are missing, it runs `tools\setup_windows.ps1` to install MSYS2 with SDL3, FFmpeg, Vulkan, shaderc, VMA, and Opus, installs Python 3.12 (via winget), and initializes `.venv` with the necessary packages.
 2. **Game files:** Select the folder containing your extracted `exefs` and `romfs` (version 2.2.0 or 2.2.1). It verifies file hashes and build-IDs, then links `targets/`.
-3. **Build:** Runs `scripts/build_all.sh` to recompile the ARM64 binaries to C, compile the native game objects, build the runtime executable (`build/xc3.exe`), and build the launcher (`build/xenoblade3_launcher.exe`).
+3. **Build:** Runs `scripts/build_all.sh` to recompile the ARM64 binaries to C, compile the native game objects, build the runtime executable (`build/xc3.exe`), and build the launcher (`xenoblade3_launcher.exe`).
 
 The launcher's **Install & build** tab does the same four steps with progress bars and logs: **Build tools**
 (`tools\setup_windows.ps1`, log `build/setup_windows.log`), **Game files**, **Build** (`build/build_all.log`) and
@@ -178,10 +180,10 @@ When finished, launch the game with `Play XC3.bat`. Precompile the shaders once 
    ```bash
    XCDE_SKIP_BOOT_LINK=1 scripts/build_boot.sh   # Recompiled game -> build/obj/
    scripts/build_rt_gfx.sh                       # Runtime + Vulkan renderer -> build/xc3.exe
-   tools/launcher/build.sh                       # Launcher -> build/xenoblade3_launcher.exe
+   tools/launcher/build.sh                       # Launcher -> xenoblade3_launcher.exe
    ```
 5. **Upscaler DLLs:** FSR 3.1 / FSR 4 use AMD's signed FidelityFX SDK 2.4.0 DLLs, included in `third_party/fidelityfx/` (MIT) and copied next to the exe by `scripts/copy_upscaler_dlls.sh` (`build_all.sh` runs it). DLSS needs NVIDIA Streamline 2.14.16, not redistributed here: put it in `sdk/` and run the same script.
-6. **Launch:** Run `Play XC3.bat` or start `build/xenoblade3_launcher.exe`.
+6. **Launch:** Run `Play XC3.bat` or start `xenoblade3_launcher.exe`.
 
 ### On Linux
 
@@ -198,8 +200,8 @@ When finished, launch the game with `Play XC3.bat`. Precompile the shaders once 
    ```bash
    scripts/build_all.sh
    ```
-   This produces `build/xc3` and `build/xenoblade3_launcher`.
-4. **Launch:** Run `build/xenoblade3_launcher` or `scripts/play.sh`.
+   This produces `build/xc3` and `xenoblade3_launcher`.
+4. **Launch:** Run `./xenoblade3_launcher` or `scripts/play.sh`.
 
 **Linux GPU notes:**
 - **AMD (Mesa RADV):** Tested on modern Radeon GPUs, including FSR 3.1 and FSR 4 (RDNA 4) via `ffx-vk-linux` (built automatically by `tools/setup_linux.sh`).
@@ -212,11 +214,14 @@ Settings are managed via the launcher or directly in `xc3.ini` in the repository
 | Key | Values | Description |
 |---|---|---|
 | `resolution` | `match`, `1`–`3`, `75%`, `50%`, `dynamic` | Rendering resolution scale |
+| `aspect` | `16:9`, `auto`, `21:9`, `32:9` | Aspect ratio (Hor+ ultrawide when wider than 16:9; applied at start) |
+| `ui_fit` | `0`, `1` | Keep 16:9 HUD proportions and shift side HUD elements to edges on ultrawide (default `1`) |
 | `upscaler` | `bilinear`, `fsr`, `fsr3`, `fsr4`, `dlss` | Upscaling method (`fsr4` falls back to FSR 3.1 when its DLLs are missing) |
 | `upscale_quality` | `native`, `quality`, `balanced`, `performance`, `ultra` | Quality preset for temporal upscalers |
 | `fps` | `30`, `60`, `120`, `144`, `165`, `unlimited` | Target framerate (above 30: real-time frame step; `XC3_REALTIME=0` uses the old 60 FPS patch path) |
 | `frame_lag` | `0`, `1` | One frame in flight above 30 FPS to reduce latency |
-| `vsync` | `0`, `1` | Vertical sync |
+| `vsync` | `0`, `1`, `mailbox`, `immediate` | Vertical sync / presentation mode |
+| `lod_scale` | `1.00`–`4.00` | Draw distance & LOD multiplier (rocks, props, buildings, dynamic objects, and procedural grass capped at `2.5x`; live in F1 → Graphics; env `XC3_LOD_SCALE`) |
 | `cutscenes` | `same`, `30`, `30fg` | Framerate behaviour during cutscenes |
 | `antialias` | `smaa`, `off` | Post-process anti-aliasing |
 | `motion_blur` | `0`, `1` | The game's motion blur and fur blur (applied at start) |
@@ -232,7 +237,7 @@ In game, **F1** opens the settings overlay.
 ## Known issues
 
 - **Early development status:** Active testing is currently focused on the opening and Colony 9 areas. Extended gameplay in later chapters, long battle encounters, and deep story progression are undergoing validation. The map-jump tour checks that areas load and render; it does not play them.
-- **First visit to an area:** Shader and pipeline builds can still cause hitches of up to a few seconds the first time an area is entered on a fresh cache (measured by the tour); with the shaders cached, later visits hitch much less.
+- **First visit to an area:** Direct SPIR-V translation and Vulkan Graphics Pipeline Library (GPL) fast linking reduce cold-cache compilation hitches substantially, though brand-new shaders or pipelines on an empty cache can still hitch briefly the first time an area is entered; subsequent visits stay smooth once cached.
 - **DLC shaders:** the shader precompilation reads only the base game's archive, so the DLC's shaders build the first time they are seen.
 - **Memory scaling in long sessions:** Pipeline libraries and driver memory grow over multi-hour play sessions; restarting periodically resolves any accumulated stutter.
 - **Platform support:** Windows x86-64 and Linux x86-64 with Vulkan 1.3. On Linux, development and testing are currently done on AMD (Mesa RADV); DLSS is Windows-only and NVIDIA Linux drivers have not yet been directly tested (see [On Linux](#on-linux)).

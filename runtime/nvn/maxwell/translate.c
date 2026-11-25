@@ -16,6 +16,7 @@
 #endif
 #include <math.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -707,8 +708,8 @@ static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, 
 
 // Integer texel coordinates in guest units -> the (possibly larger) allocation of texture slot `slot`.
 static const char *RSC2(Ctx *c, int slot, const char *fmt, ...) {
-    static char bufs[4][1024];
-    static int bi;
+    static _Thread_local char bufs[4][1024];
+    static _Thread_local int bi;
     char *o = bufs[bi++ & 3];
     char inner[700];
     va_list ap;
@@ -1064,8 +1065,8 @@ static int surface_slot(Ctx *c, uint64_t w, const char *op, uint32_t *mask_out) 
 // lost by the losing pixels; at 4K one whole column always lost at a raster tile edge: the dark vertical line). Other
 // addresses (and other stages) map to the centre of the scaled texel, as texelFetch does (rsc).
 static const char *img_coord(Ctx *c, int slot, int a) {
-    static char bufs[2][640];
-    static int bi;
+    static _Thread_local char bufs[2][640];
+    static _Thread_local int bi;
     char *o = bufs[bi++ & 1];
     if (c->stage == STAGE_VERTEX) { snprintf(o, 640, "ivec2(int(r%d), int(r%d))", a, a + 1); return o; }
     c->uses_rscale = true;
@@ -1815,8 +1816,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         bool sgn = bits(w, 48, 1);
         // [XCDE] .BREV (bit 40): the source's bits reversed before the extract (was a translation failure; seen in EoWRecomp)
         if (bits(w, 40, 1)) {
-            static int nl;
-            if (nl++ < 4) fprintf(stderr, "[translate] BFE.BREV in a shader\n");
+            static _Atomic int nl;
+            if (atomic_fetch_add(&nl, 1) < 4) fprintf(stderr, "[translate] BFE.BREV in a shader\n");
             sprintf(t, sgn ? "bfe_s(bitfieldReverse(%s), %s)" : "bfe_u(bitfieldReverse(%s), %s)", R(a), bv);
         } else
         sprintf(t, sgn ? "bfe_s(%s, %s)" : "bfe_u(%s, %s)", R(a), bv);
@@ -1918,7 +1919,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         snprintf(msb, sizeof msb, bits(w, 48, 1) ? "uint(findMSB(int%s))" : "uint(findMSB(uint%s))", src);
         if (bits(w, 41, 1)) snprintf(t, 2048, "(%s == 0xFFFFFFFFu ? 0xFFFFFFFFu : (31u - %s))", msb, msb);
         else snprintf(t, 2048, "%s", msb);
-        { static int nl; if ((bits(w, 40, 1) || bits(w, 41, 1)) && nl < 4) { nl++; fprintf(stderr, "[translate] FLO%s%s%s in a shader\n", bits(w, 48, 1) ? ".S32" : "", bits(w, 41, 1) ? ".SH" : "", bits(w, 40, 1) ? ".INV" : ""); } }
+        { static _Atomic int nl; if ((bits(w, 40, 1) || bits(w, 41, 1)) && atomic_fetch_add(&nl, 1) < 4) { fprintf(stderr, "[translate] FLO%s%s%s in a shader\n", bits(w, 48, 1) ? ".S32" : "", bits(w, 41, 1) ? ".SH" : "", bits(w, 40, 1) ? ".INV" : ""); } }
         set_reg(c, d, t);
     } else if (OPM(0x5c08000000000000ull, 0xfff8000000000000ull) || OPM(0x4c08000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x3808000000000000ull, 0xfef8000000000000ull)) {  // POPC
@@ -2650,6 +2651,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     sp(&s, "}\n");
     info->msl = s.buf;
+    info->uses_vid = c->uses_vid;
     info->attr_mask = c->in_attr_mask;
     info->out_mask = stage == STAGE_FRAGMENT ? c->omap_target : c->out_attr_mask;
     free(c->body.buf);
@@ -2702,8 +2704,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, size_t const
         nbrx++;
     }
     if (!brx_all) {
-        static int nlog;
-        if (nlog++ < 40) fprintf(stderr, "[xlat] BRX unresolved (stage %d, %zu instructions): every instruction stays a branch target\n", stage, end);
+        static _Atomic int nlog;
+        if (atomic_fetch_add(&nlog, 1) < 40) fprintf(stderr, "[xlat] BRX unresolved (stage %d, %zu instructions): every instruction stays a branch target\n", stage, end);
         nbrx = 0;
     }
     // collect branch targets (labels)
@@ -2935,6 +2937,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, size_t const
         sp(&s, "  return;\n}\n");
     }
     info->msl = s.buf;
+    info->uses_vid = c->uses_vid;
     info->attr_mask = c->in_attr_mask;
     info->out_mask = stage == STAGE_FRAGMENT ? c->omap_target : c->out_attr_mask;
     free(c->body.buf);
@@ -2945,6 +2948,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, size_t const
 void maxwell_free(ShaderInfo *s) {
     if (!s) return;
     free(s->msl);
+    free(s->spv);
     free(s);
 }
 

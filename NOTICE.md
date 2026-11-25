@@ -11,6 +11,7 @@ fonts (see `CONTRIBUTING.md`, Article I). Players must supply files extracted fr
 | AArch64→C generator (`gen.py`, `lifter.py`, `simd_c.py`, `analyze.py`, `nso.py`, `sym.py`) | [LASRecomp](https://github.com/peiikai/LASRecomp) by Peiikai, commit `136f679` | MIT | `tools/lifter/` |
 | Runtime (loader, dispatch, kernel, IPC, services, NVN→Vulkan, Maxwell shader translator) | LASRecomp, commit `136f679` | MIT | `runtime/` |
 | Real-time frame step above 30 fps: the patched sites (`set realtime`, `set menus`) and the step, cutscene and pacing logic of `runtime/frame_rate.c` (itself from MacNativeGames `games/totk/runtime/game_patches.c`, MIT) | [xc3-recomp](https://github.com/jmars125/xc3-recomp) by Valiantsin Dzerakh and contributors, commit `2b88f29` | MIT | `games/xc3/patches.py` (fps-realtime), `runtime/hle/framepace.c` |
+| Native Hor+ ultrawide support: resolution table patch, `canvas` / `uifit` patch sites, and 16:9 UI fit / edge shift / clipping logic (`runtime/resolution.c`, `runtime/nvn_api_cmd.c`, `recomp/patches-upd.txt`) | [xc3-recomp](https://github.com/jmars125/xc3-recomp) by Valiantsin Dzerakh and contributors, commit `9654b44` | MIT | `games/xc3/patches.py` (ultrawide), `runtime/hle/ultrawide.c`, `runtime/nvn/cmdbuf.c` |
 
 Every edit to a copied file is marked `[XCDE]` (the project's working name) and listed in `docs/UPSTREAM.md`.
 
