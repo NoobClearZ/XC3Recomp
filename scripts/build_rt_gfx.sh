@@ -10,7 +10,11 @@ Z="$XC3_CC"
 ZXX="$XC3_CXX"
 # [XC3] On Windows, MSYS2 headers are searched after zig's own libc (-idirafter). On Linux, pkg-config supplies system cflags.
 SYS_CXX="$XC3_SYS_CFLAGS"
-CF="-O1 $XC3_ARCH -fno-strict-aliasing -fvisibility=hidden -Iruntime -Iruntime/nvn -Ithird_party $SYS_CXX -w"
+# [XC3] The runtime at -O2 (XC3_RT_OPT overrides, e.g. XC3_RT_OPT=-O1): above 60 fps the frame is bound by the render
+# worker's CPU time (docs/plan_perf_stutter.md, phase 0: ~10 ms a frame in Colony 9 with the GPU idle), which is runtime
+# code. The recompiled game code stays at -O1 (scripts/build_boot.sh) for its compile time.
+RT_OPT="${XC3_RT_OPT:--O2}"
+CF="$RT_OPT $XC3_ARCH -fno-strict-aliasing -fvisibility=hidden -Iruntime -Iruntime/nvn -Ithird_party $SYS_CXX -w"
 # [XC3] 64-bit off_t / stat (as runtime/platform/win_compat.h asks): with mingw's 32-bit ones stat() fails on files over
 # 2 GB and the virtual romfs left out XC3's 9.7 GB bf3.ard.
 CF="$CF -D_FILE_OFFSET_BITS=64"
@@ -51,19 +55,19 @@ if pick ui/menu; then
   rm -f build/nvn/host_menu_stub.o
   for f in $I/imgui.cpp $I/imgui_draw.cpp $I/imgui_tables.cpp $I/imgui_widgets.cpp $I/backends/imgui_impl_vulkan.cpp \
            runtime/nvn/vulkan/imgui_glue.cpp runtime/ui/menu_vk.cpp; do
-    $ZXX -c $f -o build/nvn/ui_$(basename ${f%.cpp}).o -std=c++17 -O1 $XC3_ARCH \
+    $ZXX -c $f -o build/nvn/ui_$(basename ${f%.cpp}).o -std=c++17 $RT_OPT $XC3_ARCH \
       -fvisibility=hidden -Iruntime -Iruntime/nvn -Iruntime/nvn/vulkan -I$I -I$I/backends $SYS_CXX -w \
       || { echo "FAIL $f"; fail=1; }
   done
 fi
 # [XCDE] NVIDIA DLSS through Streamline (C++ headers, third_party/streamline, MIT)
 if pick nvn/vulkan/dlss; then
-  $ZXX -c runtime/nvn/vulkan/dlss.cpp -o build/nvn/nvn_vulkan_dlss.o -std=c++17 -O1 $XC3_ARCH -fvisibility=hidden -Iruntime -Iruntime/nvn -Ithird_party/streamline/include $SYS_CXX -w || { echo "FAIL nvn/vulkan/dlss"; fail=1; }
+  $ZXX -c runtime/nvn/vulkan/dlss.cpp -o build/nvn/nvn_vulkan_dlss.o -std=c++17 $RT_OPT $XC3_ARCH -fvisibility=hidden -Iruntime -Iruntime/nvn -Ithird_party/streamline/include $SYS_CXX -w || { echo "FAIL nvn/vulkan/dlss"; fail=1; }
 fi
 # [XCDE] Vulkan Memory Allocator (header-only) and the path helpers: built here with the
 # same baseline CPU as everything else.
 if pick nvn/vulkan/vma; then
-  $ZXX -c runtime/nvn/vulkan/vma.cpp -o build/nvn/vma.o -std=c++17 -O1 $XC3_ARCH -fvisibility=hidden $SYS_CXX -w || { echo "FAIL nvn/vulkan/vma"; fail=1; }
+  $ZXX -c runtime/nvn/vulkan/vma.cpp -o build/nvn/vma.o -std=c++17 $RT_OPT $XC3_ARCH -fvisibility=hidden $SYS_CXX -w || { echo "FAIL nvn/vulkan/vma"; fail=1; }
 fi
 if pick paths; then
   $Z -c runtime/paths.c -o build/nvn/paths.o $CF -DGAMELIB_ID='"dev"' || { echo "FAIL paths"; fail=1; }
