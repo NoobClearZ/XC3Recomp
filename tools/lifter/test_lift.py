@@ -168,7 +168,8 @@ def main():
     exe = os.path.join(work, 'harness')
     cc = os.environ.get('XCDE_CC', f'{sys.executable} -m ziglang cc').split()  # [XCDE]
     subprocess.check_call(cc + ['-O1', '-w', '-fno-strict-aliasing', '-march=' + os.environ.get('XCDE_TEST_MARCH', 'x86_64_v2'), '-I', os.path.join(ROOT, 'runtime'),
-                                '-o', exe, harness, os.path.join(work, 'tests.c')])
+                                '-o', exe, harness, os.path.join(work, 'tests.c'),
+                                os.path.join(ROOT, 'runtime', 'fma_soft.c')])  # [XC3] SIMD_FMA without FMA (v2)
 
     mu = uc.Uc(uc.UC_ARCH_ARM64, uc.UC_MODE_ARM)
     mu.mem_map(base, len(n.image))

@@ -22,12 +22,12 @@ fi
 for f in $I/imgui.cpp $I/imgui_draw.cpp $I/imgui_tables.cpp $I/imgui_widgets.cpp $I/backends/imgui_impl_sdl3.cpp \
          $I/backends/imgui_impl_sdlrenderer3.cpp tools/launcher/launcher.cpp; do
   o=build/launcher/$(basename ${f%.cpp}).o
-  [ "$f" -nt "$o" ] || [ ! -f "$o" ] || continue
-  $Z -c $f -o $o -O2 $XC3_ARCH -std=c++17 -I$I -I$I/backends $INC -w || exit 1
+  [ "$f" -nt "$o" ] || [ ! -f "$o" ] || continue  # [XC3] base CPU level (env.sh XC3_ARCH_BASE): the launcher starts on any PC
+  $Z -c $f -o $o -O2 ${XC3_ARCH_BASE:-$XC3_ARCH} -std=c++17 -I$I -I$I/backends $INC -w || exit 1
 done
 NEW=build/launcher/xenoblade3_launcher.new${XC3_EXE_EXT}
 OLD=build/launcher/xenoblade3_launcher.old${XC3_EXE_EXT}
-$Z -o $NEW build/launcher/*.o $RES $SDL $XC3_ARCH $LINK_EXTRA 2> build/launcher/link.err
+$Z -o $NEW build/launcher/*.o $RES $SDL ${XC3_ARCH_BASE:-$XC3_ARCH} $LINK_EXTRA 2> build/launcher/link.err
 rc=$?; [ $rc = 0 ] || { cat build/launcher/link.err | head -20; exit $rc; }
 rm -f $OLD ${OLD%.exe}.pdb 2>/dev/null
 [ -f $OUT ] && mv -f $OUT $OLD 2>/dev/null

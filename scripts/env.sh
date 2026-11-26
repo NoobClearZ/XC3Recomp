@@ -39,3 +39,26 @@ case "$(uname -s)" in
     XC3_SYS_LIBS="$XC3_M/lib/libSDL3.dll.a $XC3_M/lib/libshaderc_shared.dll.a $XC3_M/lib/libvulkan-1.dll.a $XC3_M/lib/libopus.dll.a $XC3_M/lib/libavcodec.dll.a $XC3_M/lib/libavformat.dll.a $XC3_M/lib/libavutil.dll.a $XC3_M/lib/libswscale.dll.a $XC3_M/lib/libswresample.dll.a $XC3_M/lib/libz.a $XC3_M/lib/libzstd.a -lwinmm -ldbghelp -Wl,--stack,268435456"
     ;;
 esac
+# [XC3] CPU level of the game code and the runtime: x86-64-v3 (AVX2, FMA, BMI1/2, LZCNT, MOVBE, F16C) when the building
+# CPU has all of it, else x86-64-v2 (SSE4.2). The game's FMADD/FMLA family must round once (runtime/simd.h): with FMA
+# that is one instruction, without it a call to the C library's software fma/fmaf per lane, which xc3-recomp measured
+# at 20-40 ns each and battles at a few fps (their issue #36). The compiler itself is asked what -march=native has, so
+# Windows (MSYS2) and Linux detect the same way. XC3_MARCH=v2|v3 forces a level (a build for another PC:
+# scripts/make_dist.sh). XC3_ARCH_BASE stays v2 for what must start anywhere (the launcher).
+XC3_ARCH_BASE="$XC3_ARCH"
+if [ -z "${XC3_CPU_LEVEL:-}" ]; then
+  case "${XC3_MARCH:-auto}" in
+    v2|v3) XC3_CPU_LEVEL=$XC3_MARCH ;;
+    auto)
+      XC3_CPU_LEVEL=v3
+      xc3_defs=$($XC3_CC -march=native -dM -E -x c - </dev/null 2>/dev/null || true)
+      for xc3_m in __AVX2__ __FMA__ __BMI__ __BMI2__ __LZCNT__ __MOVBE__ __F16C__; do
+        case "$xc3_defs" in *"#define $xc3_m 1"*) ;; *) XC3_CPU_LEVEL=v2 ;; esac
+      done
+      unset xc3_defs xc3_m ;;
+    *) echo "XC3_MARCH=$XC3_MARCH: use v2 or v3" >&2; XC3_CPU_LEVEL=v2 ;;
+  esac
+  export XC3_CPU_LEVEL
+fi
+# (an if, not `[ ] &&`: a v2 level would leave a false status that ends the scripts that source this under set -e)
+if [ "$XC3_CPU_LEVEL" = v3 ]; then XC3_ARCH="${XC3_ARCH%v2}v3"; fi

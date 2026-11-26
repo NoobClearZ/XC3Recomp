@@ -294,14 +294,13 @@ static void log_to_file_without_console(void) {
     _putenv("LASRECOMP_LOG_APPEND=1");
 }
 
-// [XCDE] The recompiled game code is built for x86-64-v2 (SSE4.2) by default; say so instead of crashing with an
-// illegal instruction on an older CPU. (Uses CPUID directly: __builtin_cpu_init needs compiler-rt's cpu model.)
-#include <cpuid.h>
-static void require_cpu(void) {
-    unsigned a, b, c, d;
-    if (__get_cpuid(1, &a, &b, &c, &d) && (c & (1u << 20)) /* SSE4.2 */ && (c & (1u << 23)) /* POPCNT */) return;
-    MessageBoxA(NULL, "XC3Recomp needs a CPU with SSE4.2 (Intel Nehalem / 2008 or newer, AMD Bulldozer / 2011 or newer).",
-                "XC3Recomp", MB_ICONERROR | MB_OK);
+// [XC3] The CPU level the build was made for (platform/cpu_level.h: v2 or v3), checked before main and again from
+// plat_init; a message instead of a crash with an illegal instruction on an older CPU.
+#include "cpu_level.h"
+__attribute__((constructor)) CPU_BASE static void require_cpu(void) {
+    if (CPU_LEVEL_OK()) return;
+    MessageBoxA(NULL, "This XC3Recomp build needs a CPU with " CPU_LEVEL_NAME ".\n\n" CPU_LEVEL_HINT, "XC3Recomp",
+                MB_ICONERROR | MB_OK);
     ExitProcess(1);
 }
 

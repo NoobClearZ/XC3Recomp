@@ -5,7 +5,8 @@
 // for arithmetic / conversions / FRINTX/I, saturating FP->int conversions, fused multiply-add, ARM estimate
 // tables. Not modelled: FPSR cumulative exception bits and QC, FPCR trap enables, FP16 arithmetic (ARMv8.2).
 // FPCR.AHP is honoured by the half-precision conversions. Host assumptions: IEEE binary32/64, MXCSR (or the
-// host FPU) in round-to-nearest with denormals enabled; fma must be correctly rounded (build x86 with -mfma).
+// host FPU) in round-to-nearest with denormals enabled; fma must be correctly rounded: SIMD_FMA is the FMA instruction
+// with -mfma (scripts/env.sh CPU level v3), else runtime/fma_soft.c.
 #pragma once
 #include <fenv.h>
 #include <math.h>
@@ -22,6 +23,21 @@ typedef __uint128_t u128;
 SIMD_VT(vu8, uint8_t) SIMD_VT(vs8, int8_t) SIMD_VT(vu16, uint16_t) SIMD_VT(vs16, int16_t)
 SIMD_VT(vu32, uint32_t) SIMD_VT(vs32, int32_t) SIMD_VT(vu64, uint64_t) SIMD_VT(vs64, int64_t)
 SIMD_VT(vf32, float) SIMD_VT(vf64, double)
+
+// [XC3] Fused multiply-add x*y+z rounded once (from xc3-recomp, commit ce8f67f, MIT). Without -mfma (CPU level v2) the
+// C library's fma/fmaf would be called per lane, and glibc's software versions cost tens of nanoseconds each (battles
+// at a few fps, xc3-recomp issue #36); runtime/fma_soft.c computes the same result without changing the floating-point
+// environment.
+#ifdef __FMA__
+#define SIMD_FMA(x, y, z) __builtin_elementwise_fma(x, y, z)
+#else
+float simd_fmaf_soft(float a, float b, float c);
+double simd_fmad_soft(double a, double b, double c);
+vf32 simd_fma4_soft(vf32 a, vf32 b, vf32 c);
+vf64 simd_fma2_soft(vf64 a, vf64 b, vf64 c);
+#define SIMD_FMA(x, y, z) \
+    _Generic((x), float: simd_fmaf_soft, double: simd_fmad_soft, vf32: simd_fma4_soft, vf64: simd_fma2_soft)(x, y, z)
+#endif
 typedef uint16_t __attribute__((may_alias)) sa16;
 typedef uint32_t __attribute__((may_alias)) sa32;
 typedef uint64_t __attribute__((may_alias)) sa64;

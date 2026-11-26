@@ -19,6 +19,13 @@ launcher=xenoblade3_launcher.exe; play="Play XC3.bat"  # [XC3] (tools/launcher/b
 exe=build/xc3.exe
 mkdir -p "$out/build" "$out/cache" "$out/data"
 cp -p "$exe" "$out/build/"
+# [XC3] The CPU level the game was built for (scripts/link_gfx.sh): a v3 build starts only on CPUs with AVX2.
+lvl=$(cat "${exe%.exe}.cpu_level" 2>/dev/null || echo unknown)
+echo "$lvl" > "$out/build/xc3.cpu_level"
+if [ "$lvl" != v2 ]; then
+  echo "dist: this build is for CPU level '$lvl' (x86-64-v3: AVX2, FMA). It starts only on CPUs with those (Intel 2013+,"
+  echo "      AMD Zen); for any PC, build with XC3_MARCH=v2 first (XC3_MARCH=v2 scripts/build_all.sh)."
+fi
 cp -p "$launcher" "$out/"
 for d in build/*.dll; do cp -p "$d" "$out/build/"; done  # (DLSS / FSR / Reflex)
 # the msys64 DLLs both programs load (ldd resolves them through PATH)

@@ -173,13 +173,11 @@ static void log_to_file_without_terminal(void) {
 }
 
 #if defined(__x86_64__)
-// Matches -march=x86_64_v2 used by the build scripts (SSE4.2 + POPCNT minimum).
-// Uses CPUID directly: zig's compiler-rt __builtin_cpu_supports() reports 0 on Linux.
-#include <cpuid.h>
-static void require_cpu(void) {
-    unsigned a, b, c, d;
-    if (__get_cpuid(1, &a, &b, &c, &d) && (c & (1u << 20)) /* SSE4.2 */ && (c & (1u << 23)) /* POPCNT */) return;
-    fprintf(stderr, "FATAL: XC3Recomp needs an x86-64-v2 CPU (SSE4.2 and POPCNT).\n");
+// [XC3] The CPU level the build was made for (platform/cpu_level.h), checked before main and again from plat_init.
+#include "cpu_level.h"
+__attribute__((constructor)) CPU_BASE static void require_cpu(void) {
+    if (CPU_LEVEL_OK()) return;
+    fprintf(stderr, "FATAL: this XC3Recomp build needs an " CPU_LEVEL_NAME " CPU. " CPU_LEVEL_HINT "\n");
     exit(1);
 }
 #else
